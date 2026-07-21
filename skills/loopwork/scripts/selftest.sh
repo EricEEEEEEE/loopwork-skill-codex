@@ -31,10 +31,14 @@ if "$CODEX_BIN" sandbox -c 'sandbox_mode="workspace-write"' -- bash -c "echo x >
 else
   warn "工作区内写入失败（sandbox 异常）"
 fi
-if "$CODEX_BIN" sandbox -c 'sandbox_mode="workspace-write"' -- bash -c "echo x > '$T/outside.txt'" >/dev/null 2>&1 && [ -f "$T/outside.txt" ]; then
+# 注意：/tmp 与 \$TMPDIR 在 workspace-write 下默认可写（官方设计如此），
+# 探针必须用真正的外部路径（\$HOME 下无害临时名），否则会误报。
+PROBE="$HOME/.loopwork_selftest_probe_$$.tmp"
+if "$CODEX_BIN" sandbox -c 'sandbox_mode="workspace-write"' -- bash -c "echo x > '$PROBE'" >/dev/null 2>&1 && [ -f "$PROBE" ]; then
+  rm -f "$PROBE"
   warn "工作区外写入未被拦截！沙箱边界失效，请勿挂机使用"
 else
-  ok "工作区外写入被 OS 拒绝（边界物理墙有效）"
+  ok "工作区外写入被 OS 拒绝（边界物理墙有效；/tmp 可写属设计预期）"
 fi
 
 say "[4] 具名 Permission Profile（子路径只读——可用则围栏自动升级）"

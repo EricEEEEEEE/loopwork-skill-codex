@@ -25,7 +25,8 @@ NEXT_HINT = {
 }
 
 def root():
-    r = os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
+    r = (os.environ.get("CLAUDE_PROJECT_DIR") or os.environ.get("CODEX_PROJECT_DIR")
+         or os.getcwd())
     return r
 
 def state_path():
@@ -62,14 +63,23 @@ def count_tasks():
     return done, total
 
 def count_archive_commits():
-    """数 git 历史里「存档: T…」的次数——勾选不是证据，存档才是。无 git 时返回 None。"""
+    """返回 (存档数, 空存档数)。「存档: T…」提交但 0 文件变更 = 空存档（假完成信号）。
+    勾选不是证据，存档才是；空存档连存档都不算数。无 git 时返回 (None, 0)。"""
     try:
-        out = subprocess.check_output(["git", "-C", root(), "log", "--pretty=%s"],
-                                      stderr=subprocess.DEVNULL)
-        return sum(1 for l in out.decode("utf-8", "replace").splitlines()
-                   if l.startswith("存档: T"))
+        out = subprocess.check_output(["git", "-C", root(), "log", "--pretty=%H|%s"],
+                                      stderr=subprocess.DEVNULL).decode("utf-8", "replace")
+        t_commits = [l.split("|", 1)[0] for l in out.splitlines()
+                     if "|" in l and l.split("|", 1)[1].startswith("存档: T")]
+        empty = 0
+        for h in t_commits[:50]:  # 上限 50 条，防超长历史拖慢开屏
+            files = subprocess.check_output(
+                ["git", "-C", root(), "diff-tree", "--no-commit-id", "--name-only", "-r", h],
+                stderr=subprocess.DEVNULL).decode("utf-8", "replace").strip()
+            if not files:
+                empty += 1
+        return len(t_commits), empty
     except Exception:
-        return None
+        return None, 0
 
 def count_blocked():
     p = os.path.join(root(), "BLOCKED.md")
@@ -94,11 +104,16 @@ def card():
         f"任务：{done}/{total} 完成" + (f"；问题本 {blocked} 件待拍板" if blocked else ""),
         f"下一步：{NEXT_HINT.get(stage, '读 references 对应剧本')}",
     ]
-    commits = count_archive_commits()
+    commits, empty = count_archive_commits()
     if done > 0 and commits is not None and done > commits:
         lines.append(
             f"⚠️ 对账警告：{done} 项打勾但只有 {commits} 次任务存档——勾选没有证据支撑，"
             "续接前先核实（git log / verify.sh），别在假地基上盖楼。"
+        )
+    if empty > 0:
+        lines.append(
+            f"⚠️ 对账警告：{empty} 次任务存档是空提交（没有任何文件变更）——「完成」可能没有实体，"
+            "续接前用 git show --stat 逐条核验。"
         )
     print("\n".join(lines))
     return 0

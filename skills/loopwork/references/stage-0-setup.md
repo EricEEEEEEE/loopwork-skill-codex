@@ -25,7 +25,7 @@
 3. 同意后执行：`bash <skill目录>/scripts/init_project.sh <项目目录>`（skill 目录通常在 `~/.codex/skills/loopwork` 或 `~/.agents/skills/loopwork`）
    - 脚本幂等，重复跑安全；
    - 它会：建目录 → git init → 写 `.loopwork/state.json` → 机器脚本进驻 `.loopwork/hooks/` → 接线项目级 `.codex/hooks.json`（进度卡/检测门/审计）→ 写安全规则 `.codex/rules/loopwork.rules` → 注册只读判卷员 → 生成根级 `AGENTS.md` 锚点 → 建 `.gitignore`；
-4. 建议顺手跑一次 `bash <skill目录>/scripts/selftest.sh`（30 秒、不花钱），把本机围栏能力面报给用户一句话；
+4. 建议顺手跑一次 `bash <skill目录>/scripts/selftest.sh`（30 秒、不花钱），把本机围栏能力面报给用户一句话；**自检话术必须如实降级**：哪层生效说哪层，测出警告就明说「这层这次没测出生效、真正兜底的是 XX」，绝不照本宣科夸大安全承诺（诚实纪律压过剧本原话）；
 5. 跑完向用户报告建了什么（一句话 + 文件清单），并解释围栏：「有一圈保护装置盯着这个项目：系统沙箱把工作区外的世界物理隔开，危险命令被规则直接禁止，我每轮收尾还有一道检查门对账——想偷懒或犯错都会当场被抓。这是保护你，也是保护我。」
 
 ## 4. 体检（静默做，只报结论）
