@@ -1,0 +1,8 @@
+{
+  "name": "loopwork",
+  "version": "0.1.0",
+  "description": "Guided loop workflow for complete beginners: idea → plain-language spec → approved plan → autonomous TDD loop → hands-on acceptance → perpetual improvement cycles. 小白循环工作法向导（Codex 版）。",
+  "displayName": "Loopwork",
+  "category": "coding",
+  "skills": "./skills"
+}
