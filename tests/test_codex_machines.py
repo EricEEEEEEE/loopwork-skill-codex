@@ -22,7 +22,9 @@ def run(args, cwd, env=None, inp=None):
 def main():
     S = tempfile.mkdtemp(prefix="lwc-test-")
     try:
-        env = {**os.environ, "CODEX_PROJECT_DIR": S}
+        # 剥掉外部 CLAUDE_PROJECT_DIR：它在 root() 里优先级更高，泄漏进来会把机器指向别的项目
+        env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"}
+        env["CODEX_PROJECT_DIR"] = S
         H = os.path.join(S, ".loopwork", "hooks")
 
         r = run(["bash", INIT, S, "沙盒项目"], S, env)
@@ -34,6 +36,7 @@ def main():
         check("A4 三个事件均已挂载", all(k in hooks.get("hooks", {}) for k in ("SessionStart", "Stop", "PostToolUse")))
         rules = open(os.path.join(S, ".codex", "rules", "loopwork.rules"), encoding="utf-8").read()
         check("A5 规则含 forbidden 危险命令", 'decision="forbidden"' in rules and '"--force"' in rules)
+        check("A5b 规则含 sudo 前缀与长旗标变体", '"sudo"' in rules and '"--recursive"' in rules)
         check("A6 只读判卷员注册", 'sandbox_mode = "read-only"' in
               open(os.path.join(S, ".codex", "agents", "loopwork-reviewer.toml"), encoding="utf-8").read())
         check("A7 AGENTS.md 锚点", "Loopwork" in open(os.path.join(S, "AGENTS.md"), encoding="utf-8").read())
@@ -41,6 +44,8 @@ def main():
         check("A8 init 幂等", r2.returncode == 0)
         hooks2 = json.load(open(os.path.join(S, ".codex", "hooks.json"), encoding="utf-8"))
         check("A9 重复 init 不重复接线", len(hooks2["hooks"]["Stop"]) == 1)
+        SELFTEST = os.path.join(REPO, "skills", "loopwork", "scripts", "selftest.sh")
+        check("A10 selftest 语法完好", run(["bash", "-n", SELFTEST], S, env).returncode == 0)
 
         def setp(key, val):
             run(["python3", os.path.join(H, "progress.py"), "set", key, str(val)], S, env)
@@ -141,7 +146,15 @@ def main():
         st = json.load(open(os.path.join(S, ".loopwork", "state.json"), encoding="utf-8"))
         check("D3 bump-cycle 复位 phase", st.get("phase") == "test-writing")
 
-        # ---- verify fail-closed ----
+        # ---- verify：绿灯 / 超时保险 / fail-closed ----
+        with open(os.path.join(S, "tests", "run.sh"), "w", encoding="utf-8") as f:
+            f.write("exit 0\n")
+        v = run(["bash", os.path.join(H, "verify.sh")], S, env)
+        check("E0 考题全绿 exit 0", v.returncode == 0)
+        with open(os.path.join(S, "tests", "run.sh"), "w", encoding="utf-8") as f:
+            f.write("sleep 30\n")
+        v = run(["bash", os.path.join(H, "verify.sh")], S, {**env, "LOOPWORK_VERIFY_TIMEOUT": "2"})
+        check("E2 考题挂住被超时保险击杀 (exit 124)", v.returncode == 124)
         shutil.rmtree(os.path.join(S, "tests"), ignore_errors=True)
         v = run(["bash", os.path.join(H, "verify.sh")], S, env)
         check("E1 无考题 fail-closed(exit 3)", v.returncode == 3)

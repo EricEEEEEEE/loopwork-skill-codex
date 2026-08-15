@@ -1,19 +1,43 @@
 #!/usr/bin/env bash
 # Loopwork 验收裁判：跑考题，exit code 说了算。
 # 0=全绿；非 0=不通过。找不到考题运行方式 => exit 3（fail closed：不确定 = 不通过）。
+# 考题挂住（交互等待/watch 模式）=> 超时保险强制终止，exit 124（默认 300s，LOOPWORK_VERIFY_TIMEOUT 可调）。
 set -u
-ROOT="${CLAUDE_PROJECT_DIR:-$(pwd)}"
+ROOT="${CLAUDE_PROJECT_DIR:-${CODEX_PROJECT_DIR:-$(pwd)}}"
 cd "$ROOT" || exit 3
 mkdir -p .loopwork/logs
 LOG=".loopwork/logs/verify-$(date +%Y%m%d-%H%M%S).log"
+TIMEOUT_S="${LOOPWORK_VERIFY_TIMEOUT:-300}"
+export CI=true   # 测试框架一律走非交互模式（jest/vitest 据此关掉 watch）
 
 run() { # run <描述> <命令...>
-  echo "[verify] $1" | tee -a "$LOG"
+  echo "[verify] $1（超时上限 ${TIMEOUT_S}s）" | tee -a "$LOG"
   shift
-  "$@" >>"$LOG" 2>&1
+  # macOS 没有 GNU timeout，用 python3 做便携超时；进程组整组收割，防测试框架留孤儿
+  python3 - "$TIMEOUT_S" "$@" >>"$LOG" 2>&1 <<'PYEOF'
+import os, signal, subprocess, sys
+limit = float(sys.argv[1])
+try:
+    p = subprocess.Popen(sys.argv[2:], start_new_session=True)
+except FileNotFoundError as e:
+    print(f"[verify] 命令不存在: {e}", flush=True)
+    sys.exit(127)
+try:
+    sys.exit(p.wait(timeout=limit))
+except subprocess.TimeoutExpired:
+    try:
+        os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+    except Exception:
+        p.kill()
+    print(f"[verify] 考题运行超过 {int(limit)}s 被强制终止——多半卡在交互等待或 watch 模式。", flush=True)
+    sys.exit(124)
+PYEOF
   local code=$?
   if [ $code -eq 0 ]; then
     echo "[verify] ✅ 全绿 (exit 0) — 日志: $LOG"
+  elif [ $code -eq 124 ]; then
+    echo "[verify] ⏰ 超时 (exit 124) — 考题挂住了，按不通过处理。最后 20 行："
+    tail -20 "$LOG"
   else
     echo "[verify] ❌ 不通过 (exit $code) — 最后 20 行："
     tail -20 "$LOG"

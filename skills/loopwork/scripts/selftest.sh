@@ -60,10 +60,13 @@ else
   warn "profile 行为不明（无输出）——维持降级围栏"
 fi
 
-say "[5] 钩子生效性（需交互验证的部分）"
-say "     Stop 检测门与挂机档依赖 .codex/hooks.json——非交互模式下无法自动验证。"
-say "     首次使用时请在交互会话里跑一轮任务，确认轮末能看到检测门/挂机档的提示；"
-say "     没看到 → 检查项目信任状态（Codex 需信任本项目的 .codex/ 层）。"
+say "[5] 钩子/规则生效性（信任门——实战最常见的静默失效点）"
+say "     项目级 .codex/hooks.json 与 .codex/rules/ 只在「项目被 Codex 信任」后才会加载；"
+say "     未信任 = 检测门/挂机档/审计静默不跑，不报任何错。"
+say "     验证法（30 秒）：在项目里新开一个 Codex 会话，第一屏应出现进度卡"
+say "     （SessionStart 钩子）——看到 = 钩子层已生效；没看到 = 先信任本项目再试。"
+say "     诊断隔离（仅排障用）：codex --dangerously-bypass-hook-trust 下钩子生效而正常启动不生效，"
+say "     即可确认是信任门问题；该旗标只许排障单次使用，不许当常态。"
 
 say ""
 say "== 自检完成：$PASS 项通过，$WARN 项警告 =="

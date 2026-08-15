@@ -84,6 +84,13 @@ prefix_rule(pattern=["git", "push", "-f"], decision="forbidden", justification="
 prefix_rule(pattern=["git", "reset", "--hard"], decision="prompt", justification="会丢弃未存档工作，需确认")
 prefix_rule(pattern=["chmod", "777"], decision="forbidden", justification="不做全开权限")
 prefix_rule(pattern=["sed", "-i"], decision="prompt", justification="就地改写文件，围栏要求确认目标不是考题/规格")
+# 前缀规则按 argv 逐词匹配——sudo 前缀和长旗标写法是另一条命令，必须显式列出
+prefix_rule(pattern=["sudo", "rm", "-rf"], decision="forbidden", justification="sudo 前缀不豁免删除禁令")
+prefix_rule(pattern=["sudo", "rm", "-fr"], decision="forbidden", justification="同上")
+prefix_rule(pattern=["rm", "--recursive", "--force"], decision="forbidden", justification="长旗标写法同样禁止")
+prefix_rule(pattern=["rm", "--force", "--recursive"], decision="forbidden", justification="同上")
+prefix_rule(pattern=["sudo", "git", "push", "--force"], decision="forbidden", justification="sudo 前缀不豁免强推禁令")
+prefix_rule(pattern=["sudo", "chmod", "777"], decision="forbidden", justification="sudo 前缀不豁免权限禁令")
 EOF
   echo "[init] 安全规则已写入 (.codex/rules/loopwork.rules)"
 fi
