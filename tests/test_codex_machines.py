@@ -46,6 +46,45 @@ def main():
         check("A9 重复 init 不重复接线", len(hooks2["hooks"]["Stop"]) == 1)
         SELFTEST = os.path.join(REPO, "skills", "loopwork", "scripts", "selftest.sh")
         check("A10 selftest 语法完好", run(["bash", "-n", SELFTEST], S, env).returncode == 0)
+        # A11 规则文件升级：旧版缺 sudo/长旗标条目 → 追加一次、幂等、用户自定义规则不动
+        rules_p = os.path.join(S, ".codex", "rules", "loopwork.rules")
+        with open(rules_p, "w", encoding="utf-8") as f:
+            f.write('prefix_rule(pattern=["rm", "-rf"], decision="forbidden", justification="旧版")\n'
+                    'prefix_rule(pattern=["my", "custom"], decision="prompt", justification="用户自定义")\n')
+        run(["bash", INIT, S, "沙盒项目"], S, env)
+        r1txt = open(rules_p, encoding="utf-8").read()
+        run(["bash", INIT, S, "沙盒项目"], S, env)
+        r2txt = open(rules_p, encoding="utf-8").read()
+        check("A11 旧规则升级追加 sudo 条目且幂等",
+              r1txt.count('"sudo", "rm", "-rf"') == 1 and r2txt.count('"sudo", "rm", "-rf"') == 1
+              and "用户自定义" in r2txt)
+        # A12 钩子接线升级：过期签名的自家接线被清、用户钩子保留
+        hp = os.path.join(S, ".codex", "hooks.json")
+        cfgh = json.load(open(hp, encoding="utf-8"))
+        cfgh["hooks"]["Stop"] = [
+            {"hooks": [{"type": "command", "command": "python3 .loopwork/hooks/stop_hook.py --legacy"}]},
+            {"hooks": [{"type": "command", "command": "echo user-hook"}]},
+        ]
+        with open(hp, "w", encoding="utf-8") as f:
+            json.dump(cfgh, f, ensure_ascii=False, indent=2)
+        run(["bash", INIT, S, "沙盒项目"], S, env)
+        stop_entries = json.load(open(hp, encoding="utf-8"))["hooks"]["Stop"]
+        blob = json.dumps(stop_entries, ensure_ascii=False)
+        check("A12 过期接线被清+用户钩子保留",
+              len(stop_entries) == 2 and "--legacy" not in blob and "user-hook" in blob and "stop_hook.py" in blob)
+        # A13 首次存档密钥筛查：疑似密钥文件不入库、不删盘（独立沙盒走首次提交路径）
+        S2 = tempfile.mkdtemp(prefix="lwc-sec-")
+        try:
+            with open(os.path.join(S2, "fake.pem"), "w") as f:
+                f.write("PRIVATE KEY\n")
+            with open(os.path.join(S2, "notes.txt"), "w") as f:
+                f.write("hello\n")
+            run(["bash", INIT, S2, "密钥沙盒"], S2, env)
+            ls = run(["git", "ls-files"], S2, env).stdout
+            check("A13 首次存档剔除疑似密钥（盘上保留）",
+                  "fake.pem" not in ls and "notes.txt" in ls and os.path.exists(os.path.join(S2, "fake.pem")))
+        finally:
+            shutil.rmtree(S2, ignore_errors=True)
 
         def setp(key, val):
             run(["python3", os.path.join(H, "progress.py"), "set", key, str(val)], S, env)
@@ -133,6 +172,14 @@ def main():
                 inp=json.dumps({"tool_name": "apply_patch", "tool_input": {"file_path": "src/x.js"}, "cwd": S}))
         audit = os.path.join(S, ".loopwork", "logs", "audit.jsonl")
         check("D1 审计日志落盘", p.returncode == 0 and os.path.exists(audit) and "apply_patch" in open(audit).read())
+        # R1 审计日志单代轮转：超 5MB 顶成 .1，新账本从头记
+        with open(audit, "w") as f:
+            f.write("x" * (5 * 1024 * 1024 + 100))
+        p = run(["python3", os.path.join(H, "audit_log.py")], S, env,
+                inp=json.dumps({"tool_name": "Bash", "tool_input": {"command": "ls"}, "cwd": S}))
+        check("R1 审计日志超 5MB 单代轮转",
+              p.returncode == 0 and os.path.exists(audit + ".1")
+              and os.path.getsize(audit) < 1000 and '"ls"' in open(audit, encoding="utf-8").read())
         with open(os.path.join(S, "tasks.md"), "w", encoding="utf-8") as f:
             f.write("- [x] T01 a\n- [x] T02 b\n- [ ] T03 c\n")
         p = run(["python3", os.path.join(H, "progress.py"), "card"], S, env)
@@ -155,6 +202,20 @@ def main():
             f.write("sleep 30\n")
         v = run(["bash", os.path.join(H, "verify.sh")], S, {**env, "LOOPWORK_VERIFY_TIMEOUT": "2"})
         check("E2 考题挂住被超时保险击杀 (exit 124)", v.returncode == 124)
+        # E3 多栈裁判：没有 tests/run.sh 时探测到的栈全都要跑，一红全局红（假 npm shim，不依赖本机 npm）
+        os.remove(os.path.join(S, "tests", "run.sh"))
+        shim = os.path.join(S, "shim")
+        os.makedirs(shim, exist_ok=True)
+        with open(os.path.join(shim, "npm"), "w") as f:
+            f.write("#!/bin/sh\nexit 1\n")
+        os.chmod(os.path.join(shim, "npm"), 0o755)
+        with open(os.path.join(S, "package.json"), "w", encoding="utf-8") as f:
+            f.write('{"name": "x", "version": "1.0.0", "scripts": {"test": "exit 1"}}\n')
+        with open(os.path.join(S, "tests", "test_ok.py"), "w", encoding="utf-8") as f:
+            f.write("import unittest\nclass TestOK(unittest.TestCase):\n    def test_ok(self):\n        self.assertTrue(True)\n")
+        v = run(["bash", os.path.join(H, "verify.sh")], S, {**env, "PATH": shim + os.pathsep + env["PATH"]})
+        check("E3 多栈一红全局红", v.returncode == 1, f"rc={v.returncode}")
+        os.remove(os.path.join(S, "package.json"))
         shutil.rmtree(os.path.join(S, "tests"), ignore_errors=True)
         v = run(["bash", os.path.join(H, "verify.sh")], S, env)
         check("E1 无考题 fail-closed(exit 3)", v.returncode == 3)

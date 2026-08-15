@@ -77,7 +77,7 @@ Codex 的 hook-deny 拦截当前存在已知上游缺陷（[openai/codex#27833](
 
 ## Status
 
-**v1 built; 26-case machine regression green（`bash skills/loopwork/scripts/verify.sh` 可复跑）; Stop-hook 接通与真实小白field test 待首跑验证（步骤已写进剧本）。** Codex alpha 通道日更，装机后请跑 selftest 以你的版本为准。Treat as beta.
+**v1 built; 40-case machine regression green（`python3 tests/test_codex_machines.py` 可复跑）; Stop-hook 接通与真实小白field test 待首跑验证（步骤已写进剧本）。** Codex alpha 通道日更，装机后请跑 selftest 以你的版本为准。Treat as beta.
 
 ## License
 

@@ -6,6 +6,8 @@ set -u
 ROOT="${CLAUDE_PROJECT_DIR:-${CODEX_PROJECT_DIR:-$(pwd)}}"
 cd "$ROOT" || exit 3
 mkdir -p .loopwork/logs
+# 日志只留最近 20 份（含本次），防跑几百轮后把仓库塞满
+ls -t .loopwork/logs/verify-*.log 2>/dev/null | tail -n +20 | while IFS= read -r old; do rm -f "$old"; done
 LOG=".loopwork/logs/verify-$(date +%Y%m%d-%H%M%S).log"
 TIMEOUT_S="${LOOPWORK_VERIFY_TIMEOUT:-300}"
 export CI=true   # 测试框架一律走非交互模式（jest/vitest 据此关掉 watch）
@@ -45,30 +47,47 @@ PYEOF
   return $code
 }
 
-# 按项目类型探测考题运行方式（显式入口优先，找到第一个匹配即用）
+# 探测考题运行方式：tests/run.sh 是项目自己的总裁判（只跑它）；
+# 没有总裁判时，探测到的栈全部要跑、全部要绿——只跑第一个会漏掉混合项目的另一半考题。
 if [ -f tests/run.sh ]; then
   run "tests/run.sh" bash tests/run.sh; exit $?
-elif [ -f package.json ] && grep -q '"test"' package.json; then
-  run "npm test" npm test --silent; exit $?
-elif [ -d tests ] && ls tests/*.py >/dev/null 2>&1; then
+fi
+
+RAN=0; FINAL=0
+note() { RAN=$((RAN+1)); if [ "$1" -ne 0 ] && [ "$FINAL" -eq 0 ]; then FINAL=$1; fi; }
+
+if [ -f package.json ] && grep -q '"test"' package.json; then
+  run "npm test" npm test --silent; note $?
+fi
+if [ -d tests ] && ls tests/*.py >/dev/null 2>&1; then
   if command -v pytest >/dev/null 2>&1; then
-    run "pytest" pytest -q tests; exit $?
+    run "pytest" pytest -q tests; note $?
   else
     run "python unittest" python3 -m unittest discover -s tests
     code=$?
     # fail closed：discover 找到 0 个测试时 unittest 也报 exit 0，这是假绿
     if [ $code -eq 0 ] && grep -q "Ran 0 tests" "$LOG"; then
       echo "[verify] ⚠️ unittest 发现 0 个测试（假绿），按不通过处理。"
-      exit 3
+      code=3
     fi
-    exit $code
+    note $code
   fi
-elif [ -f go.mod ]; then
-  run "go test" go test ./...; exit $?
-elif [ -f Cargo.toml ]; then
-  run "cargo test" cargo test --quiet; exit $?
+fi
+if [ -f go.mod ]; then
+  run "go test" go test ./...; note $?
+fi
+if [ -f Cargo.toml ]; then
+  run "cargo test" cargo test --quiet; note $?
 fi
 
-echo "[verify] ⚠️ 未找到考题运行方式（fail closed，按不通过处理）。" | tee -a "$LOG"
-echo "         需要先建立考题体系：npm test / pytest / go test / cargo test / tests/run.sh 任一即可。"
-exit 3
+if [ "$RAN" -eq 0 ]; then
+  echo "[verify] ⚠️ 未找到考题运行方式（fail closed，按不通过处理）。" | tee -a "$LOG"
+  echo "         需要先建立考题体系：npm test / pytest / go test / cargo test / tests/run.sh 任一即可。"
+  exit 3
+fi
+if [ "$FINAL" -eq 0 ]; then
+  echo "[verify] ✅ 共 ${RAN} 个测试栈全部通过"
+else
+  echo "[verify] ❌ ${RAN} 个测试栈中有失败（首个失败 exit ${FINAL}）"
+fi
+exit $FINAL

@@ -22,7 +22,14 @@ def main():
             "tool": tool,
             "summary": str(summary)[:200],
         }
-        with open(os.path.join(logdir, "audit.jsonl"), "a", encoding="utf-8") as f:
+        path = os.path.join(logdir, "audit.jsonl")
+        # 单代轮转：超 5MB 把老账本顶成 .1（审计要能追溯，但不能无限吃盘）
+        try:
+            if os.path.getsize(path) > 5 * 1024 * 1024:
+                os.replace(path, path + ".1")
+        except OSError:
+            pass
+        with open(path, "a", encoding="utf-8") as f:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
         return 0
     except Exception:

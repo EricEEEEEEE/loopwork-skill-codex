@@ -36,6 +36,12 @@
 - Permission Profile schema 在稳定版可用后 → `tests/` 实现期只读升级为 OS 级（selftest 第 4 项变 ✅ 即可配）；
 - 上游 #27833 修复后 → PreToolUse deny 升级为第四道防线。
 
+## 复核记录 · 2026-08-15
+
+- 本机（开发机）当前无 codex CLI 可用，第 3/4/5/6 项无法原样复测——07-21 的结论保留为当日事实，不代表最新 alpha 行为，装机后以 selftest 为准；
+- 第 5 项（Stop hook 未触发）根因已收敛到**项目信任门**：`.codex/` 项目级 hooks/rules 仅在项目被信任后加载，`codex exec` 的隔离探针项目大概率从未被信任过。对策已落进剧本：stage-0 信任后立即验证接通（新会话第一屏进度卡）、stage-4 挂机档首跑验证、selftest 第 5 项 30 秒探针；`--dangerously-bypass-hook-trust` 仅限单次排障隔离，不作为常规运行方式；
+- 第 6 项（#27833 hook-deny 缺陷）无法本机复现，状态以上游 issue 页为准；围栏架构继续按「不依赖 hook-deny」设计，上游修复后再升级为第四道防线。
+
 ## 与 Claude Code 版的机制差异（同样写在 README）
 
 CC 版：动手瞬间物理拦截（PreToolUse 钩子实测可拦 + Bash 层等价拦截）。

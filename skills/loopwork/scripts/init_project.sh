@@ -60,11 +60,15 @@ WANT = {
     "Stop":         [{"hooks": [cmd("python3 .loopwork/hooks/stop_hook.py")]}],
     "PostToolUse":  [{"hooks": [cmd("python3 .loopwork/hooks/audit_log.py")]}],
 }
+def sig(x): return json.dumps(x, sort_keys=True, ensure_ascii=False)
 for event, entries in WANT.items():
     have = hooks.setdefault(event, [])
+    want_sigs = {sig(e) for e in entries}
+    # 升级去重：旧版本的接线（同样指向 .loopwork/hooks/ 但签名过期）先清掉，
+    # 防止新旧两条并存、同一事件钩子跑两遍；用户自己的钩子（不含该路径）原样保留
+    have[:] = [h for h in have if sig(h) in want_sigs or ".loopwork/hooks/" not in sig(h)]
     for e in entries:
-        sig = json.dumps(e, sort_keys=True, ensure_ascii=False)
-        if not any(json.dumps(h, sort_keys=True, ensure_ascii=False) == sig for h in have):
+        if sig(e) not in {sig(h) for h in have}:
             have.append(e)
 with open(p, "w", encoding="utf-8") as f:
     json.dump(cfg, f, ensure_ascii=False, indent=2)
@@ -93,6 +97,19 @@ prefix_rule(pattern=["sudo", "git", "push", "--force"], decision="forbidden", ju
 prefix_rule(pattern=["sudo", "chmod", "777"], decision="forbidden", justification="sudo 前缀不豁免权限禁令")
 EOF
   echo "[init] 安全规则已写入 (.codex/rules/loopwork.rules)"
+elif ! grep -qF 'pattern=["sudo", "rm", "-rf"]' .codex/rules/loopwork.rules; then
+  # 旧版规则文件缺 sudo/长旗标条目——只追加缺失块，不动用户可能加过的自定义规则
+  cat >> .codex/rules/loopwork.rules <<'EOF'
+
+# 前缀规则按 argv 逐词匹配——sudo 前缀和长旗标写法是另一条命令，必须显式列出（升级追加）
+prefix_rule(pattern=["sudo", "rm", "-rf"], decision="forbidden", justification="sudo 前缀不豁免删除禁令")
+prefix_rule(pattern=["sudo", "rm", "-fr"], decision="forbidden", justification="同上")
+prefix_rule(pattern=["rm", "--recursive", "--force"], decision="forbidden", justification="长旗标写法同样禁止")
+prefix_rule(pattern=["rm", "--force", "--recursive"], decision="forbidden", justification="同上")
+prefix_rule(pattern=["sudo", "git", "push", "--force"], decision="forbidden", justification="sudo 前缀不豁免强推禁令")
+prefix_rule(pattern=["sudo", "chmod", "777"], decision="forbidden", justification="sudo 前缀不豁免权限禁令")
+EOF
+  echo "[init] 安全规则已升级（追加 sudo/长旗标条目）"
 fi
 
 # 6. 只读判卷员（原生只读子代理定义）
@@ -133,7 +150,15 @@ done
 git config user.name  >/dev/null 2>&1 || git config user.name "Loopwork User"
 git config user.email >/dev/null 2>&1 || git config user.email "loopwork@local"
 if ! git rev-parse HEAD >/dev/null 2>&1; then
-  git add -A && git commit -qm "存档: Loopwork 项目初始化"
+  git add -A
+  # 首次存档前的密钥筛查：疑似密钥文件剔出存档并提醒（密钥入库是最难撤销的事故之一）
+  SUS="$(git diff --cached --name-only | grep -iE '(^|/)\.env(\.|$)|\.pem$|\.p12$|\.key$|(^|/)(secrets?|credentials?)\.' || true)"
+  if [ -n "$SUS" ]; then
+    printf '%s\n' "$SUS" | while IFS= read -r f; do git rm --cached -q -- "$f" || true; done
+    echo "[init] ⚠️ 疑似密钥文件已剔出首次存档（确认安全后再自行决定是否入库）："
+    printf '%s\n' "$SUS" | sed 's/^/         - /'
+  fi
+  git commit -qm "存档: Loopwork 项目初始化"
   echo "[init] 首次存档完成"
 fi
 
