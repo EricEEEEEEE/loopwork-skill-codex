@@ -75,6 +75,22 @@ def main():
             f.write("legit test\n")
         code, d = stop_hook()
         check("B4 test-writing 期写考题放行", not d)
+        # —— B01 回归：存档即推进基线 的快乐路径与两种忘推场景 ——
+        git("add", "tests/exam.py"); git("commit", "-qm", "存档: 红考题")
+        head2 = git("rev-parse", "HEAD").stdout.strip()
+        setp("last_round_commit", head2); setp("phase", "implementing")
+        code, d = stop_hook()
+        check("B5 红考题存档+基线推进后实现期放行", code == 0 and not d)
+        setp("last_round_commit", base)
+        code, d = stop_hook()
+        check("B6 忘推基线被顶回并教推进", d.get("decision") == "block" and "last_round_commit" in d.get("reason", ""))
+        setp("last_round_commit", head2)
+        with open(os.path.join(S, "tests", "exam.py"), "a") as f:
+            f.write("# tamper\n")
+        code, d = stop_hook()
+        check("B7 实现期未存档改考题要求撤销", d.get("decision") == "block" and "撤销" in d.get("reason", ""))
+        git("checkout", "--", "tests/exam.py")
+        setp("phase", "test-writing")
 
         # ---- 挂机批模式 ----
         flag = os.path.join(S, ".loopwork", "batch.flag")
@@ -84,14 +100,18 @@ def main():
         setp("round_count", 0); setp("batch_size", 2)
         code, d = stop_hook()
         check("C1 批中顶回", d.get("decision") == "block" and "批模式进行中" in d.get("reason", ""))
-        check("C2 flag 记录起点+防打转标记", open(flag).read().strip() == "0,0")
+        check("C2 flag 记录起点+防打转标记", open(flag).read().strip() == "0,0,0")
         code, d = stop_hook()
-        check("C3 轮数无进展自动放行（防原地打转）", not d and not os.path.exists(flag))
+        check("C3 无进展第 1 次仅警告", d.get("decision") == "block" and "没涨" in d.get("reason", "")
+              and open(flag).read().strip() == "0,0,1")
+        code, d = stop_hook()
+        check("C3b 连续 2 次无进展自动停批", d.get("decision") == "block" and "打转" in d.get("reason", "")
+              and not os.path.exists(flag))
         with open(flag, "w") as f:
-            f.write("0,0")  # 批次起点=第0轮（模拟批已开跑）
+            f.write("0,0")  # 旧版两段 flag 格式（模拟批已开跑，起点=第0轮）
         setp("round_count", 2)
         code, d = stop_hook()
-        check("C4 满批强制验收", d.get("decision") == "block" and "验收" in d.get("reason", "") and not os.path.exists(flag))
+        check("C4 满批强制验收（兼容旧 flag）", d.get("decision") == "block" and "验收" in d.get("reason", "") and not os.path.exists(flag))
         open(flag, "w").close()
         with open(os.path.join(S, "tasks.md"), "w", encoding="utf-8") as f:
             f.write("- [ ] T01 a 〔卡·B01〕\n- [x] T02 b\n")

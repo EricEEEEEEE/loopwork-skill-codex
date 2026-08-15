@@ -12,11 +12,11 @@ description: Guides complete beginners from a raw idea to working, continuously-
 1. **先读状态，再说话**：每次被激活，第一动作是找 `.loopwork/state.json`（先看当前目录，再问用户项目在哪）。没有 → 新项目，走 Stage 0；有 → 按「点火路由」（②）续接。绝不凭记忆猜进度。
 2. **文件即记忆**：一切进度写在项目文件里（state.json / tasks.md / BLOCKED.md / JOURNAL.md）。你可以失忆，文件不会。感觉上下文丢失时：重读 state.json → 项目根 AGENTS.md → 本文件 → 当前阶段的 `references/` 剧本。
 3. **执行自主，方向人定**：阶段方向、计划批准、以及【花钱 / 删除既有文件 / 对外发布 / 修改项目规矩 / 密钥】五类动作，无条件停下等用户明确同意，且**永不**和普通「下一步」混在一起顺手带过。
-4. **考题先红后绿**：先写测试、亲眼跑红，再写实现；实现期间绝不改考题（写完考题立刻执行 `python3 .loopwork/hooks/progress.py set phase implementing`）。
+4. **考题先红后绿**：先写测试、亲眼跑红，再写实现；实现期间绝不改考题（顺序：存档红考题 → `progress.py set last_round_commit $(git rev-parse HEAD)` 推进基线 → `progress.py set phase implementing`，顺序错了检测门会把红考题当违规顶回）。
 5. **验收看证据**：只认 `bash .loopwork/hooks/verify.sh` 的 exit code、能点开的页面、N 对 M 逐条点名。永不说「应该可以了」。**勾选不是证据，存档才是。**
 6. **卡住不停机**：要用户拍板的事写进 `BLOCKED.md`（问题/背景/建议+理由），跳过做下一条，到检查点一把清算。
 7. **小白语言**：黑话首次出现必带白话比喻（词典见 `references/glossary.md`，词典是示例集非穷举）；提问一次只问一个，用**编号选择题的纯文本形式**（推荐项排第一并标注，永远有「不知道，你来定」的出口），等用户回答再问下一个。
-8. **每轮必留痕**：每完成一条任务、每切换一个阶段 = git commit（对用户叫「存档」）+ 勾掉 tasks.md + JOURNAL.md 追加一行 + `progress.py bump-round` + **`progress.py set last_round_commit $(git rev-parse HEAD)`（基线锚定，检测门靠它对账）**。会话结束前必须状态落盘。
+8. **每轮必留痕**：每完成一条任务、每切换一个阶段 = git commit（对用户叫「存档」）+ 勾掉 tasks.md + JOURNAL.md 追加一行 + `progress.py bump-round`。**存档即推进基线：每次 git commit 后（含红考题存档、批末落盘）立刻 `progress.py set last_round_commit $(git rev-parse HEAD)`，检测门靠它对账**。会话结束前必须状态落盘。
 9. **永不宣布「项目完成」**：只报「这一批完成」。清单空了 = 该续单了（`references/loop-mode.md`）。
 10. **不碰项目外的世界**：只在项目文件夹内动文件（系统沙箱在工作区边界上物理拦截）；密钥永不写进代码、日志或对话；绝不执行 `rm -rf`、`git push --force`（规则层已设 forbidden）。
 11. **诚实汇报**：测试红就说红并贴输出；每个脚本调用显式检查 exit code 和输出非空——**没报错 ≠ 成功**；说好 N 项交付了 M 项，逐个点名。
@@ -59,7 +59,7 @@ description: Guides complete beginners from a raw idea to working, continuously-
 
 每一轮：
 1. 取 `tasks.md` 第一条未勾任务；`progress.py set phase test-writing`；
-2. 为它写考题（从 spec.md 验收句直译），运行，**亲眼确认失败**，失败输出记 JOURNAL；先把失败考题单独存档；
+2. 为它写考题（从 spec.md 验收句直译），运行，**亲眼确认失败**，失败输出记 JOURNAL；先把失败考题单独存档，并立刻 `progress.py set last_round_commit $(git rev-parse HEAD)` 推进基线；
 3. `progress.py set phase implementing`；
 4. 写实现 → `bash .loopwork/hooks/verify.sh`：红 → 修到绿（长输出重定向 `.loopwork/logs/` 只看 tail -20）；
 5. 绿 → git commit「存档: T{编号} {任务名}」→ 勾掉任务 → `progress.py bump-round` → `progress.py set last_round_commit <新 commit hash>` → JOURNAL 一行；
