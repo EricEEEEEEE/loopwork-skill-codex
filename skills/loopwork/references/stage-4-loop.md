@@ -16,7 +16,7 @@ SKILL.md ④ 是节奏总纲（压缩后仍在），本文是细则。两者冲�
 6. **验证**：`bash .loopwork/hooks/verify.sh`
    - exit 0 = 绿；非 0 = 继续修；
    - 长输出必须 `> .loopwork/logs/round-N.log 2>&1` 然后 `tail -20`，绝不把整版日志倒进对话；
-7. **收轮**：绿 → `git commit -m "存档: T{编号} {任务名}"` → tasks.md 勾掉 → `progress.py bump-round` → JOURNAL 追加一行：`T02 ✅ 2 红→绿 | 备注`
+7. **收轮**：绿 → `git commit -m "存档: T{编号} {任务名}"` → tasks.md 勾掉 → `progress.py bump-round` → JOURNAL 追加一行：`progress.py journal "T02 ✅ 2 红→绿 | 备注"`（JOURNAL 只许追加，改写/删除会被围栏拦下）
 8. **进度播报**（一行）：「✅ 3/12 · 记一笔完成 · 下一条：支出列表」
 
 ## 问题本（BLOCKED.md）

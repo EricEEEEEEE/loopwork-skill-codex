@@ -95,11 +95,27 @@ prefix_rule(pattern=["rm", "--recursive", "--force"], decision="forbidden", just
 prefix_rule(pattern=["rm", "--force", "--recursive"], decision="forbidden", justification="同上")
 prefix_rule(pattern=["sudo", "git", "push", "--force"], decision="forbidden", justification="sudo 前缀不豁免强推禁令")
 prefix_rule(pattern=["sudo", "chmod", "777"], decision="forbidden", justification="sudo 前缀不豁免权限禁令")
+# 改历史 / 销毁证据：Loopwork 的存档只增不减，改得动的历史不算证据
+prefix_rule(pattern=["git", "commit", "--amend"], decision="forbidden", justification="改写已有存档等于抹掉证据，要修正就再存一档")
+prefix_rule(pattern=["git", "rebase"], decision="forbidden", justification="重排历史会让基线存档凭空消失，检测门会判假历史并停机")
+prefix_rule(pattern=["git", "filter-branch"], decision="forbidden", justification="同上，批量伪造历史")
+prefix_rule(pattern=["git", "filter-repo"], decision="forbidden", justification="同上，批量伪造历史")
+prefix_rule(pattern=["git", "update-ref"], decision="forbidden", justification="直接改引用 = 手工伪造历史")
+prefix_rule(pattern=["git", "stash"], decision="forbidden", justification="把改动藏进不在存档里的暗格；藏起来的不算证据")
+prefix_rule(pattern=["git", "clean"], decision="forbidden", justification="批量删未跟踪文件，git 里也找不回来——要删就点名删单个文件")
+prefix_rule(pattern=["sudo", "git", "commit", "--amend"], decision="forbidden", justification="sudo 前缀不豁免改历史禁令")
+prefix_rule(pattern=["sudo", "git", "rebase"], decision="forbidden", justification="同上")
+prefix_rule(pattern=["sudo", "git", "filter-branch"], decision="forbidden", justification="同上")
+prefix_rule(pattern=["sudo", "git", "filter-repo"], decision="forbidden", justification="同上")
+prefix_rule(pattern=["sudo", "git", "update-ref"], decision="forbidden", justification="同上")
+prefix_rule(pattern=["sudo", "git", "stash"], decision="forbidden", justification="同上")
+prefix_rule(pattern=["sudo", "git", "clean"], decision="forbidden", justification="同上")
 EOF
   echo "[init] 安全规则已写入 (.codex/rules/loopwork.rules)"
-elif ! grep -qF 'pattern=["sudo", "rm", "-rf"]' .codex/rules/loopwork.rules; then
-  # 旧版规则文件缺 sudo/长旗标条目——只追加缺失块，不动用户可能加过的自定义规则
-  cat >> .codex/rules/loopwork.rules <<'EOF'
+else
+  # 旧版规则文件：缺哪块补哪块，只追加，不动用户可能加过的自定义规则
+  if ! grep -qF 'pattern=["sudo", "rm", "-rf"]' .codex/rules/loopwork.rules; then
+    cat >> .codex/rules/loopwork.rules <<'EOF'
 
 # 前缀规则按 argv 逐词匹配——sudo 前缀和长旗标写法是另一条命令，必须显式列出（升级追加）
 prefix_rule(pattern=["sudo", "rm", "-rf"], decision="forbidden", justification="sudo 前缀不豁免删除禁令")
@@ -109,7 +125,29 @@ prefix_rule(pattern=["rm", "--force", "--recursive"], decision="forbidden", just
 prefix_rule(pattern=["sudo", "git", "push", "--force"], decision="forbidden", justification="sudo 前缀不豁免强推禁令")
 prefix_rule(pattern=["sudo", "chmod", "777"], decision="forbidden", justification="sudo 前缀不豁免权限禁令")
 EOF
-  echo "[init] 安全规则已升级（追加 sudo/长旗标条目）"
+    echo "[init] 安全规则已升级（追加 sudo/长旗标条目）"
+  fi
+  if ! grep -qF 'pattern=["git", "commit", "--amend"]' .codex/rules/loopwork.rules; then
+    cat >> .codex/rules/loopwork.rules <<'EOF'
+
+# 改历史 / 销毁证据：存档只增不减，改得动的历史不算证据（升级追加）
+prefix_rule(pattern=["git", "commit", "--amend"], decision="forbidden", justification="改写已有存档等于抹掉证据，要修正就再存一档")
+prefix_rule(pattern=["git", "rebase"], decision="forbidden", justification="重排历史会让基线存档凭空消失，检测门会判假历史并停机")
+prefix_rule(pattern=["git", "filter-branch"], decision="forbidden", justification="同上，批量伪造历史")
+prefix_rule(pattern=["git", "filter-repo"], decision="forbidden", justification="同上，批量伪造历史")
+prefix_rule(pattern=["git", "update-ref"], decision="forbidden", justification="直接改引用 = 手工伪造历史")
+prefix_rule(pattern=["git", "stash"], decision="forbidden", justification="把改动藏进不在存档里的暗格；藏起来的不算证据")
+prefix_rule(pattern=["git", "clean"], decision="forbidden", justification="批量删未跟踪文件，git 里也找不回来——要删就点名删单个文件")
+prefix_rule(pattern=["sudo", "git", "commit", "--amend"], decision="forbidden", justification="sudo 前缀不豁免改历史禁令")
+prefix_rule(pattern=["sudo", "git", "rebase"], decision="forbidden", justification="同上")
+prefix_rule(pattern=["sudo", "git", "filter-branch"], decision="forbidden", justification="同上")
+prefix_rule(pattern=["sudo", "git", "filter-repo"], decision="forbidden", justification="同上")
+prefix_rule(pattern=["sudo", "git", "update-ref"], decision="forbidden", justification="同上")
+prefix_rule(pattern=["sudo", "git", "stash"], decision="forbidden", justification="同上")
+prefix_rule(pattern=["sudo", "git", "clean"], decision="forbidden", justification="同上")
+EOF
+    echo "[init] 安全规则已升级（追加改历史/销毁证据条目）"
+  fi
 fi
 
 # 6. 只读判卷员（原生只读子代理定义）

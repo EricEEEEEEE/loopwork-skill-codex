@@ -51,7 +51,7 @@ default_permissions = "lw"
 EOF
 OUT="$(cd "$T/ws" && CODEX_HOME="$T/home" "$CODEX_BIN" sandbox -- bash -c 'echo probe > tests/p.txt && echo WRITABLE || echo DENIED' 2>&1)"; CODE=$?
 if [ $CODE -ne 0 ]; then
-  warn "profile 配置无法运行（exit $CODE，本版本 schema 不可用/崩溃）——维持降级围栏（规则+检测门）"
+  warn "profile 配置无法运行（exit ${CODE}，本版本 schema 不可用/崩溃）——维持降级围栏（规则+检测门）"
 elif echo "$OUT" | grep -q DENIED; then
   ok "profile 生效：tests/ 只读被 OS 强制！可在 config 启用具名 profile 升级围栏"
 elif [ -f "$T/ws/tests/p.txt" ]; then

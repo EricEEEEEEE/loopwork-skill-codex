@@ -8,6 +8,7 @@
   progress.py bump-round          # 内循环轮数 +1
   progress.py bump-cycle          # 外循环圈数 +1，round 归零
   progress.py milestone <name>    # 记录里程碑（幂等，返回 new/dup）
+  progress.py journal "<一行>"    # 向 JOURNAL.md 追加一行（日志只增不减的唯一入口）
 """
 import json, os, subprocess, sys, datetime
 
@@ -118,6 +119,20 @@ def card():
     print("\n".join(lines))
     return 0
 
+def journal_append(line):
+    """向 JOURNAL.md 追加一行。日志是历史：只增不减，围栏拦住一切改写/删除，
+    这里是模型记账的正门。换行被压平——一轮一行才读得下去。"""
+    text = " ".join(str(line).splitlines()).strip()
+    if not text:
+        print("journal 需要一行内容", file=sys.stderr)
+        return 1
+    if not text.startswith("-"):
+        text = "- " + text
+    with open(os.path.join(root(), "JOURNAL.md"), "a", encoding="utf-8") as jf:
+        jf.write(text + "\n")
+    print("ok")
+    return 0
+
 def main(argv):
     if len(argv) < 2:
         print(__doc__); return 1
@@ -154,6 +169,8 @@ def main(argv):
         except Exception:
             pass
         print(st["cycle"])
+    elif cmd == "journal":
+        return journal_append(argv[2] if len(argv) > 2 else "")
     elif cmd == "milestone":
         ms = st.setdefault("milestones", [])
         if argv[2] in ms:

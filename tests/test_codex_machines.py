@@ -37,8 +37,23 @@ def main():
         rules = open(os.path.join(S, ".codex", "rules", "loopwork.rules"), encoding="utf-8").read()
         check("A5 规则含 forbidden 危险命令", 'decision="forbidden"' in rules and '"--force"' in rules)
         check("A5b 规则含 sudo 前缀与长旗标变体", '"sudo"' in rules and '"--recursive"' in rules)
+        check("A5c 规则含改历史/销毁证据禁令",
+              all(f'"{k}"' in rules for k in ("--amend", "rebase", "filter-branch",
+                                              "update-ref", "stash", "clean"))
+              and '"sudo", "git", "rebase"' in rules)
         check("A6 只读判卷员注册", 'sandbox_mode = "read-only"' in
               open(os.path.join(S, ".codex", "agents", "loopwork-reviewer.toml"), encoding="utf-8").read())
+        # 判卷员的任务指令不许悄悄消失或缩水（与 CC 版同一份职责，锁住）
+        rv_p = os.path.join(REPO, "skills", "loopwork", "references", "reviewer.md")
+        check("A6b 判卷员任务指令在", os.path.exists(rv_p))
+        rv = open(rv_p, encoding="utf-8").read() if os.path.exists(rv_p) else ""
+        check("A6c 判卷员三段齐全（合规/质量/考题盲区 + 固定输出格式）",
+              all(k in rv for k in ("第一段 · 合规", "第二段 · 质量", "第三段 · 考题盲区",
+                                    "判卷结论：", "N 对 M", "verify.sh")))
+        s5 = open(os.path.join(REPO, "skills", "loopwork", "references", "stage-5-accept.md"),
+                  encoding="utf-8").read()
+        check("A6d stage-5 指向判卷员并说明只读由系统强制",
+              "references/reviewer.md" in s5 and "read-only" in s5)
         check("A7 AGENTS.md 锚点", "Loopwork" in open(os.path.join(S, "AGENTS.md"), encoding="utf-8").read())
         r2 = run(["bash", INIT, S, "沙盒项目"], S, env)
         check("A8 init 幂等", r2.returncode == 0)
@@ -58,6 +73,10 @@ def main():
         check("A11 旧规则升级追加 sudo 条目且幂等",
               r1txt.count('"sudo", "rm", "-rf"') == 1 and r2txt.count('"sudo", "rm", "-rf"') == 1
               and "用户自定义" in r2txt)
+        check("A11b 旧规则同时补上改历史禁令且幂等",
+              r1txt.count('pattern=["git", "commit", "--amend"]') == 1
+              and r2txt.count('pattern=["git", "commit", "--amend"]') == 1
+              and 'pattern=["git", "clean"]' in r2txt)
         # A12 钩子接线升级：过期签名的自家接线被清、用户钩子保留
         hp = os.path.join(S, ".codex", "hooks.json")
         cfgh = json.load(open(hp, encoding="utf-8"))
@@ -134,7 +153,63 @@ def main():
         code, d = stop_hook()
         check("B7 实现期未存档改考题要求撤销", d.get("decision") == "block" and "撤销" in d.get("reason", ""))
         git("checkout", "--", "tests/exam.py")
+        # —— 围栏保护自己：动 .loopwork/hooks/ 也是动受保护文件 ——
+        gp = os.path.join(S, ".loopwork", "hooks", "stop_hook.py")
+        with open(gp, "a") as f:
+            f.write("# tamper\n")
+        code, d = stop_hook()
+        check("B8 实现期改围栏脚本被顶回",
+              d.get("decision") == "block" and ".loopwork/hooks/" in d.get("reason", ""))
+        git("checkout", "--", ".loopwork/hooks/stop_hook.py")
+        code, d = stop_hook()
+        check("B9 围栏脚本恢复后放行", code == 0 and not d)
         setp("phase", "test-writing")
+        # —— 只增不减：JOURNAL 是历史，审计账本是流水 ——
+        jp = os.path.join(S, "JOURNAL.md")
+        git("add", "JOURNAL.md"); git("commit", "-qm", "存档: 批末状态落盘")
+        setp("last_round_commit", git("rev-parse", "HEAD").stdout.strip())  # 存档即推进基线
+        j_head = open(jp, encoding="utf-8").read()
+        with open(jp, "w", encoding="utf-8") as f:
+            f.write("\n".join(j_head.splitlines()[:-1]) + "\n")
+        code, d = stop_hook()
+        check("B10 JOURNAL 未存档删行被顶回（日志只增不减）",
+              d.get("decision") == "block" and "JOURNAL" in d.get("reason", ""))
+        with open(jp, "w", encoding="utf-8") as f:
+            f.write(j_head + "- 补记一行\n")
+        code, d = stop_hook()
+        check("B11 JOURNAL 追加放行", code == 0 and not d)
+        with open(jp, "w", encoding="utf-8") as f:
+            f.write("\n".join(j_head.splitlines()[:-1]) + "\n")
+        git("add", "JOURNAL.md"); git("commit", "-qm", "改写日志")
+        code, d = stop_hook()
+        check("B12 JOURNAL 已存档的删行也被顶回",
+              d.get("decision") == "block" and "JOURNAL" in d.get("reason", ""))
+        with open(jp, "w", encoding="utf-8") as f:
+            f.write(j_head)
+        git("add", "JOURNAL.md"); git("commit", "-qm", "还原日志")
+        setp("last_round_commit", git("rev-parse", "HEAD").stdout.strip())
+        code, d = stop_hook()
+        check("B13 还原并推进基线后放行", code == 0 and not d)
+        audit = os.path.join(S, ".loopwork", "logs", "audit.jsonl")
+        os.makedirs(os.path.dirname(audit), exist_ok=True)
+        line = '{"ts":"x","tool":"Bash","summary":"a"}\n'
+        with open(audit, "w", encoding="utf-8") as f:
+            f.write(line * 20)
+        stop_hook()  # 记下基准
+        with open(audit, "w", encoding="utf-8") as f:
+            f.write(line)
+        code, d = stop_hook()
+        check("B14 审计账本被抹短被顶回", d.get("decision") == "block" and "审计" in d.get("reason", ""))
+        code, d = stop_hook()
+        check("B15 抹账只报一次（基准已重置，不死循环）", code == 0 and not d)
+        with open(audit, "w", encoding="utf-8") as f:
+            f.write(line * 20)
+        stop_hook()
+        os.replace(audit, audit + ".1")
+        with open(audit, "w", encoding="utf-8") as f:
+            f.write(line)
+        code, d = stop_hook()
+        check("B16 轮转后账本变短不误报", code == 0 and not d)
 
         # ---- 挂机批模式 ----
         flag = os.path.join(S, ".loopwork", "batch.flag")
@@ -144,10 +219,10 @@ def main():
         setp("round_count", 0); setp("batch_size", 2)
         code, d = stop_hook()
         check("C1 批中顶回", d.get("decision") == "block" and "批模式进行中" in d.get("reason", ""))
-        check("C2 flag 记录起点+防打转标记", open(flag).read().strip() == "0,0,0")
+        check("C2 flag 记录起点+防打转标记+顶回总数", open(flag).read().strip() == "0,0,0,1")
         code, d = stop_hook()
         check("C3 无进展第 1 次仅警告", d.get("decision") == "block" and "没涨" in d.get("reason", "")
-              and open(flag).read().strip() == "0,0,1")
+              and open(flag).read().strip() == "0,0,1,2")
         code, d = stop_hook()
         check("C3b 连续 2 次无进展自动停批", d.get("decision") == "block" and "打转" in d.get("reason", "")
               and not os.path.exists(flag))
@@ -166,6 +241,19 @@ def main():
             f.write("- [x] T01\n- [x] T02\n")
         code, d = stop_hook()
         check("C6 批空放行+摘 flag", not d and not os.path.exists(flag))
+        # —— 顶回总数上限：Codex 平台不给顶回设硬上限，这道刹车只能围栏自己踩 ——
+        with open(os.path.join(S, "tasks.md"), "w", encoding="utf-8") as f:
+            f.write("- [ ] T01 a\n- [ ] T02 b\n")
+        with open(flag, "w") as f:
+            f.write("2,,0,6")  # 起点=第 2 轮、已顶回 6 次：下一次就撞上限
+        code, d = stop_hook()
+        check("C7 顶回累计到上限自动停批（摘 flag）",
+              d.get("decision") == "block" and "安全上限" in d.get("reason", "")
+              and not os.path.exists(flag))
+        code, d = stop_hook()
+        st_now = json.load(open(os.path.join(S, ".loopwork", "state.json"), encoding="utf-8"))
+        check("C8 停机后下一轮无条件放行且计数归零（会话真能停下来）",
+              code == 0 and not d and st_now.get("stop_blocks") == 0)
 
         # ---- 审计与对账 ----
         p = run(["python3", os.path.join(H, "audit_log.py")], S, env,

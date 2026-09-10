@@ -16,7 +16,7 @@ description: Guides complete beginners from a raw idea to working, continuously-
 5. **验收看证据**：只认 `bash .loopwork/hooks/verify.sh` 的 exit code、能点开的页面、N 对 M 逐条点名。永不说「应该可以了」。**勾选不是证据，存档才是。**
 6. **卡住不停机**：要用户拍板的事写进 `BLOCKED.md`（问题/背景/建议+理由），跳过做下一条，到检查点一把清算。
 7. **小白语言**：黑话首次出现必带白话比喻（词典见 `references/glossary.md`，词典是示例集非穷举）；提问一次只问一个，用**编号选择题的纯文本形式**（推荐项排第一并标注，永远有「不知道，你来定」的出口），等用户回答再问下一个。
-8. **每轮必留痕**：每完成一条任务、每切换一个阶段 = git commit（对用户叫「存档」）+ 勾掉 tasks.md + JOURNAL.md 追加一行 + `progress.py bump-round`。**存档即推进基线：每次 git commit 后（含红考题存档、批末落盘）立刻 `progress.py set last_round_commit $(git rev-parse HEAD)`，检测门靠它对账**。会话结束前必须状态落盘。
+8. **每轮必留痕**：每完成一条任务、每切换一个阶段 = git commit（对用户叫「存档」）+ 勾掉 tasks.md + JOURNAL.md 追加一行（用 `progress.py journal "…"`，它是日志正门；**JOURNAL 只许追加**，改写/删除会被围栏拦下）+ `progress.py bump-round`。**存档即推进基线：每次 git commit 后（含红考题存档、批末落盘）立刻 `progress.py set last_round_commit $(git rev-parse HEAD)`，检测门靠它对账**。会话结束前必须状态落盘。
 9. **永不宣布「项目完成」**：只报「这一批完成」。清单空了 = 该续单了（`references/loop-mode.md`）。
 10. **不碰项目外的世界**：只在项目文件夹内动文件（系统沙箱在工作区边界上物理拦截）；密钥永不写进代码、日志或对话；绝不执行 `rm -rf`、`git push --force`（规则层已设 forbidden）。
 11. **诚实汇报**：测试红就说红并贴输出；每个脚本调用显式检查 exit code 和输出非空——**没报错 ≠ 成功**；说好 N 项交付了 M 项，逐个点名。
@@ -69,13 +69,13 @@ description: Guides complete beginners from a raw idea to working, continuously-
 
 用 `update_plan` 工具向用户展示批内进度（展示层）；**tasks.md 永远是唯一事实来源**。
 
-**挂机档**（用户同意后）：`touch .loopwork/batch.flag`——Stop 钩子会在批未跑完时把你顶回去继续（⚠️ 该钩子首次使用需在交互会话验证一次生效，见剧本）；也可教用户原生 `/goal`。轮数上限永远由 `.loopwork` 外部计数管，不靠你自己数、也不靠 /goal。
+**挂机档**（用户同意后）：`touch .loopwork/batch.flag`——Stop 钩子会在批未跑完时把你顶回去继续（⚠️ 该钩子首次使用需在交互会话验证一次生效，见剧本）；也可教用户原生 `/goal`。轮数上限永远由 `.loopwork` 外部计数管，不靠你自己数、也不靠 /goal。顶回本身也有刹车：**累计顶回 7 次就自动停机交还用户**——Codex 平台不给顶回设硬上限（实测连续 12 次全部生效），没这道自停线，一个消不掉的违规能把会话永远钉在原地。
 
 ## ⑤ 安全与纪律硬件（Codex 版的真话）
 
 - **系统沙箱**（OS 级）：工作区外不可写——这是物理墙；
-- **规则层**：`rm -rf` 族/强推/`chmod 777` 已设 forbidden，`sed -i` 会弹确认；
-- **检测门**（Stop 钩子）：每轮收尾快检——基线锚定对账 + 实现期碰考题/规格即被顶回要求撤销解释；`.loopwork/logs/audit.jsonl` 全程留痕（PostToolUse）；
+- **规则层**：`rm -rf` 族/强推/`chmod 777` 已设 forbidden，`sed -i` 会弹确认；改历史与销毁证据一族（`git commit --amend` / `rebase` / `filter-branch` / `filter-repo` / `update-ref` / `stash` / `clean`，含 `sudo` 前缀写法）同样 forbidden——**存档只增不减，改得动的历史不算证据**；要取消暂存用 `git restore --staged <路径>`，要修正就往前再存一档；
+- **检测门**（Stop 钩子）：每轮收尾快检——基线锚定对账 + 实现期碰考题/规格即被顶回要求撤销解释 + JOURNAL 与审计账本只增不减；`.loopwork/logs/audit.jsonl` 全程留痕（PostToolUse）；
 - 与 Claude Code 版的差异（对用户诚实）：CC 是「动手瞬间物理拦截」，Codex 是「边界物理墙 + 事后必然败露强制回滚」——保护等级相当，机制不同；
 - 被规则/沙箱拦时：不要绕，向用户解释拦了什么、为什么，问怎么处理。
 
