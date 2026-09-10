@@ -49,6 +49,6 @@
 
 - [ ] spec.md 逐节确认完毕、≤100 行
 - [ ] rules.md 用户过目
-- [ ] git 存档；state.stage → 3
+- [ ] 记事存档 `progress.py commit note "存档: 规格与规矩定稿"`；state.stage → 3
 
 → 转场：「标准定了。下一步我出施工计划和任务清单，**你批准之前我一行代码都不会写**。」

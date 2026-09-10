@@ -29,11 +29,14 @@ def main():
 
         r = run(["bash", INIT, S, "沙盒项目"], S, env)
         check("A1 init 建家成功", r.returncode == 0, r.stderr[-200:])
-        for f in ("stop_hook.py", "audit_log.py", "progress.py", "verify.sh"):
+        for f in ("guard_rules.py", "guard_log.py", "guard_pre.py", "stop_hook.py",
+                  "audit_log.py", "progress.py", "verify.sh"):
             check(f"A2 机器进驻 {f}", os.path.exists(os.path.join(H, f)))
         check("A3 Codex 钩子接线", os.path.exists(os.path.join(S, ".codex", "hooks.json")))
         hooks = json.load(open(os.path.join(S, ".codex", "hooks.json"), encoding="utf-8"))
-        check("A4 三个事件均已挂载", all(k in hooks.get("hooks", {}) for k in ("SessionStart", "Stop", "PostToolUse")))
+        check("A4 四个事件均已挂载",
+              all(k in hooks.get("hooks", {})
+                  for k in ("PreToolUse", "SessionStart", "Stop", "PostToolUse")))
         rules = open(os.path.join(S, ".codex", "rules", "loopwork.rules"), encoding="utf-8").read()
         check("A5 规则含 forbidden 危险命令", 'decision="forbidden"' in rules and '"--force"' in rules)
         check("A5b 规则含 sudo 前缀与长旗标变体", '"sudo"' in rules and '"--recursive"' in rules)
@@ -47,13 +50,22 @@ def main():
         rv_p = os.path.join(REPO, "skills", "loopwork", "references", "reviewer.md")
         check("A6b 判卷员任务指令在", os.path.exists(rv_p))
         rv = open(rv_p, encoding="utf-8").read() if os.path.exists(rv_p) else ""
-        check("A6c 判卷员三段齐全（合规/质量/考题盲区 + 固定输出格式）",
-              all(k in rv for k in ("第一段 · 合规", "第二段 · 质量", "第三段 · 考题盲区",
-                                    "判卷结论：", "N 对 M", "verify.sh")))
+        check("A6c 判卷员四段齐全（合规/质量/作弊清单/考题盲区 + 固定输出格式）",
+              all(k in rv for k in ("第一段 · 合规", "第二段 · 质量", "第三段 · 作弊清单",
+                                    "第四段 · 考题盲区", "判卷结论：", "N 对 M", "verify.sh")))
+        check("A6e 作弊清单八条齐全，且如实交代自动探测只查得动前五条",
+              all(k in rv for k in ("空转修复", "断言放水", "断言消失", "吞异常",
+                                    "抑制检查", "假重构", "查表蒙混", "功能孤岛"))
+              and "0/27" in rv and "只查得动 1–5" in rv)
         s5 = open(os.path.join(REPO, "skills", "loopwork", "references", "stage-5-accept.md"),
                   encoding="utf-8").read()
         check("A6d stage-5 指向判卷员并说明只读由系统强制",
               "references/reviewer.md" in s5 and "read-only" in s5)
+        s0 = open(os.path.join(REPO, "skills", "loopwork", "references", "stage-0-setup.md"),
+                  encoding="utf-8").read()
+        check("A6f stage-0 交代围栏管不到供应链：清点别人的钩子 + 搜来的安装指引只转述不执行",
+              all(k in s0 for k in (".codex/hooks.json", "AgentBaiting", "只转述",
+                                    "装什么由用户指定", "不再询问")))
         check("A7 AGENTS.md 锚点", "Loopwork" in open(os.path.join(S, "AGENTS.md"), encoding="utf-8").read())
         r2 = run(["bash", INIT, S, "沙盒项目"], S, env)
         check("A8 init 幂等", r2.returncode == 0)
@@ -115,6 +127,67 @@ def main():
             except Exception:
                 d = {}
             return p.returncode, d
+
+        # ---- 实时围栏（PreToolUse · guard_pre.py）----
+        # 喂真实形状的 payload：0.153.4 实测 Bash / apply_patch 的 tool_input 只有 command 一个键。
+        BLK = os.path.join(S, ".loopwork", "logs", "blocks.jsonl")
+
+        def gpre(tool, command, phase=None, ti=None):
+            if phase is not None:
+                setp("phase", phase)
+            p = run(["python3", os.path.join(H, "guard_pre.py")], S, env,
+                    inp=json.dumps({"tool_name": tool, "cwd": S,
+                                    "tool_input": ti if ti is not None else {"command": command}}))
+            return p.returncode, p.stderr
+
+        def patch(*lines):
+            return "*** Begin Patch\n" + "\n".join(lines) + "\n@@\n-old\n+new\n*** End Patch\n"
+
+        rc, err = gpre("apply_patch", patch("*** Update File: tests/exam.py"), "implementing")
+        check("P1 实现期补丁改考题被拦", rc == 2 and "实现阶段" in err, err[-160:])
+        rc, _ = gpre("apply_patch", patch("*** Update File: src/app.py"))
+        check("P2 实现期补丁改实现文件放行", rc == 0)
+        rc, _ = gpre("apply_patch", patch("*** Add File: tests/exam2.py"), "test-writing")
+        check("P3 出题期补丁写考题放行", rc == 0)
+        rc, err = gpre("apply_patch", patch("*** Move to: tests/renamed.py"), "implementing")
+        check("P4 Move to: 行也算落点", rc == 2 and "实现阶段" in err, err[-160:])
+        rc, err = gpre("apply_patch", patch(f"*** Update File: {os.path.join(S, 'tests', 'exam.py')}"))
+        check("P5 绝对路径落点照样归一后被拦", rc == 2, err[-160:])
+        rc, err = gpre("apply_patch", patch("*** Update File: /etc/hosts"))
+        check("P6 补丁写到项目外被拦", rc == 2 and "之外" in err, err[-160:])
+        rc, err = gpre("apply_patch", patch("*** Update File: JOURNAL.md"))
+        check("P7 补丁改 JOURNAL.md 被拦（只许追加）", rc == 2 and "只许追加" in err, err[-160:])
+        rc, err = gpre("Bash", "sed -i '' -e 's/a/b/' .loopwork/state.json")
+        check("P8 shell 绕道改状态文件被拦", rc == 2 and "state.json" in err, err[-160:])
+        rc, err = gpre("Bash", "echo '{}' > .codex/hooks.json")
+        check("P9 shell 改 Codex 接线被拦（围栏自保）", rc == 2 and ".codex/hooks.json" in err, err[-160:])
+        rc, err = gpre("Bash", "rm -rf build/")
+        check("P10 rm -rf 被拦", rc == 2 and "rm -rf" in err, err[-160:])
+        rc, err = gpre("Bash", "git commit --amend -m x")
+        check("P11 改历史被拦", rc == 2 and "amend" in err, err[-160:])
+        rc, _ = gpre("Bash", "python3 -m pytest tests/ -q")
+        check("P12 实现期跑考题放行（提到路径不算写）", rc == 0)
+        rc, err = gpre("Bash", "apply_patch <<'EOF'\n" + patch("*** Update File: tests/exam.py") + "EOF")
+        check("P13 heredoc 走 shell 的补丁一样被拦", rc == 2 and "实现阶段" in err, err[-160:])
+        rc, _ = gpre("web_search", "", ti={"query": "loopwork"})
+        check("P15 没见过的工具放行", rc == 0)
+        recs = [json.loads(x) for x in open(BLK, encoding="utf-8").read().splitlines() if x.strip()]
+        check("P16 取证账本一次拦截一行（10 次拦截 + 1 次未知工具）",
+              len(recs) == 11 and recs[0].get("rule") == "impl-locked"
+              and recs[-1].get("rule") == "unknown-tool"
+              and recs[-1].get("target") == "keys=query", f"{len(recs)} 条 / {str(recs[-1])[:100]}")
+        check("P17 账本字段齐（ts/tool/target/rule/phase）",
+              all(set(r) == {"ts", "tool", "target", "rule", "phase"} for r in recs))
+        rc, _ = gpre("Bash", "cat .loopwork/state.json")
+        check("P18 判定核心缺席不阻塞（先确认在场时正常）", rc == 0)
+        gr = os.path.join(H, "guard_rules.py")
+        os.replace(gr, gr + ".bak")
+        rc, err = gpre("apply_patch", patch("*** Update File: tests/exam.py"))
+        check("P19 判定核心不在时放行但出声（不做纸老虎也不砖会话）",
+              rc == 0 and "guard_rules.py" in err, err[-160:])
+        os.replace(gr + ".bak", gr)
+        os.remove(BLK)
+        setp("phase", "test-writing")
 
         # ---- 检测门 ----
         def git(*a):
@@ -219,13 +292,44 @@ def main():
         setp("round_count", 0); setp("batch_size", 2)
         code, d = stop_hook()
         check("C1 批中顶回", d.get("decision") == "block" and "批模式进行中" in d.get("reason", ""))
-        check("C2 flag 记录起点+防打转标记+顶回总数", open(flag).read().strip() == "0,0,0,1")
+        fp = lambda: open(flag).read().strip().split(",")
+        check("C2 flag 记录起点+防打转标记+顶回总数+进展指纹",
+              fp()[:4] == ["0", "0", "0", "1"] and len(fp()[4]) == 12)
         code, d = stop_hook()
         check("C3 无进展第 1 次仅警告", d.get("decision") == "block" and "没涨" in d.get("reason", "")
-              and open(flag).read().strip() == "0,0,1,2")
+              and fp()[:4] == ["0", "0", "1", "2"])
         code, d = stop_hook()
         check("C3b 连续 2 次无进展自动停批", d.get("decision") == "block" and "打转" in d.get("reason", "")
               and not os.path.exists(flag))
+        # 无进展 = 轮数没涨 ∧ HEAD 没动 ∧ tasks.md 没动 ∧ BLOCKED.md 没动。
+        # 只看轮数会把「一条硬任务跨两次顶回」误判成打转——两版量同一把尺（guard_rules.PROGRESS_FILES）。
+        open(flag, "w").close()
+        stop_hook()                                     # 第 1 次：记下起点与指纹
+        with open(os.path.join(S, "BLOCKED.md"), "a", encoding="utf-8") as f:
+            f.write("## B01 · 图表库选择\n")             # 轮数仍没涨，但问题本新增了一条
+        code, d = stop_hook()
+        rs = d.get("reason", "")
+        check("C3c 轮数没涨但问题本新增 → 算进展，不计打转",
+              d.get("decision") == "block" and "没涨" not in rs and fp()[2] == "0", rs[-160:])
+        with open(os.path.join(S, "tasks.md"), "a", encoding="utf-8") as f:
+            f.write("- [ ] T04 d\n")                    # 轮数仍没涨，但 tasks.md 动了
+        code, d = stop_hook()
+        rs = d.get("reason", "")
+        check("C3d 轮数没涨但 tasks.md 动了 → 算进展，不计打转",
+              d.get("decision") == "block" and "没涨" not in rs and fp()[2] == "0", rs[-160:])
+        git("commit", "-qm", "存档: 进展指纹用例", "--allow-empty")
+        code, d = stop_hook()
+        rs = d.get("reason", "")
+        check("C3e 轮数没涨但落了新存档 → 算进展，不计打转",
+              d.get("decision") == "block" and "没涨" not in rs and fp()[2] == "0", rs[-160:])
+        code, d = stop_hook()
+        rs = d.get("reason", "")
+        check("C3f 三样全没动才计无进展",
+              d.get("decision") == "block" and "没涨" in rs and fp()[2] == "1", rs[-160:])
+        os.remove(flag)
+        os.remove(os.path.join(S, "BLOCKED.md"))
+        with open(os.path.join(S, "tasks.md"), "w", encoding="utf-8") as f:
+            f.write("- [ ] T01 a\n- [ ] T02 b\n- [ ] T03 c\n")
         with open(flag, "w") as f:
             f.write("0,0")  # 旧版两段 flag 格式（模拟批已开跑，起点=第0轮）
         setp("round_count", 2)
@@ -280,6 +384,215 @@ def main():
         run(["python3", os.path.join(H, "progress.py"), "bump-cycle"], S, env)
         st = json.load(open(os.path.join(S, ".loopwork", "state.json"), encoding="utf-8"))
         check("D3 bump-cycle 复位 phase", st.get("phase") == "test-writing")
+
+        # ---- 钩子代存档（pending_commit）----
+        # 模型在沙箱里写不动 .git：它只登记意图，钩子（沙箱外）验完再落。
+        # 这一组盯的是「验」这一半——什么该拒、拒了以后登记有没有清干净。
+        PG = os.path.join(H, "progress.py")
+
+        def pcommit(kind, msg):
+            return run(["python3", PG, "commit", kind, msg], S, env)
+
+        def head():
+            return git("rev-parse", "HEAD").stdout.strip()
+
+        def stjson():
+            return json.load(open(os.path.join(S, ".loopwork", "state.json"), encoding="utf-8"))
+
+        def exam(body="def test_x():\n    assert False\n"):
+            with open(os.path.join(S, "tests", "exam_red.py"), "w", encoding="utf-8") as f:
+                f.write(body)
+
+        with open(os.path.join(S, "tests", "run.sh"), "w", encoding="utf-8") as f:
+            f.write("exit 0\n")
+        git("add", "-A"); git("commit", "-qm", "代存档测试起点")
+        setp("stage", "4"); setp("phase", "test-writing"); setp("round_count", 0)
+        setp("last_round_commit", head())
+        h0 = head()
+
+        code, d = stop_hook()
+        check("G1 无 pending 时钩子不碰 git", code == 0 and not d and head() == h0, str(d)[:120])
+        p = pcommit("blue", "存档: T9")
+        check("G2 kind 只认 red/green", p.returncode == 1 and "red|green" in p.stderr,
+              p.stderr[-120:])
+        p = pcommit("red", "   ")
+        check("G3 存档必须带一句话说明", p.returncode == 1 and "一句话" in p.stderr, p.stderr[-120:])
+        exam()
+        p = pcommit("red", "存档: T9 红考题")
+        check("G4 登记只写 state，不自己碰 git",
+              p.returncode == 0 and stjson().get("pending_commit", {}).get("kind") == "red"
+              and head() == h0, (p.stdout + p.stderr)[-120:])
+        os.makedirs(os.path.join(S, "src"), exist_ok=True)
+        with open(os.path.join(S, "src", "app.py"), "w", encoding="utf-8") as f:
+            f.write("x = 1\n")
+        code, d = stop_hook()
+        check("G5 红存档混进实现文件被拒，登记清空",
+              d.get("decision") == "block" and "只该有考题" in d.get("reason", "")
+              and "src/app.py" in d.get("reason", "")
+              and head() == h0 and "pending_commit" not in stjson(), str(d)[:200])
+        os.remove(os.path.join(S, "src", "app.py"))
+        exam("KEY = '" + "sk-" + "A1b2C3d4" * 3 + "'\n")   # 假密钥拼出来：不把像密钥的字面量留在仓库里
+        pcommit("red", "存档: T9 红考题")
+        code, d = stop_hook()
+        check("G6 疑似密钥命中被拒（内容层筛查）",
+              d.get("decision") == "block" and "疑似密钥" in d.get("reason", "")
+              and head() == h0 and "pending_commit" not in stjson(), str(d)[:200])
+        exam()
+        pcommit("green", "存档: T9 绿实现")
+        code, d = stop_hook()
+        check("G7 手里没有红存档票的绿存档被拒（先红后绿）",
+              d.get("decision") == "block" and "没有过红存档" in d.get("reason", "")
+              and head() == h0 and "pending_commit" not in stjson(), str(d)[:200])
+        pcommit("red", "存档: T9 红考题")
+        code, d = stop_hook()
+        h1, st_a = head(), stjson()
+        check("G8 红存档落地：基线自动前进 + 记下红票 + 单次顶回带 hash",
+              d.get("decision") == "block" and "红存档已落" in d.get("reason", "")
+              and h1[:10] in d.get("reason", "") and h1 != h0
+              and st_a.get("last_round_commit") == h1 and st_a.get("red_commit_pending") is True
+              and "pending_commit" not in st_a, str(d)[:200])
+        with open(os.path.join(S, "src", "app.py"), "w", encoding="utf-8") as f:
+            f.write("x = 1\n")   # 绿存档带的是实现——这次它就该跟着一起入库
+        with open(os.path.join(S, "tests", "run.sh"), "w", encoding="utf-8") as f:
+            f.write("exit 1\n")
+        pcommit("green", "存档: T9 绿实现")
+        code, d = stop_hook()
+        check("G9 考题没全绿的绿存档被拒，红票不被吃掉",
+              d.get("decision") == "block" and "verify.sh 不是 exit 0" in d.get("reason", "")
+              and head() == h1 and stjson().get("red_commit_pending") is True, str(d)[:200])
+        with open(os.path.join(S, "tests", "run.sh"), "w", encoding="utf-8") as f:
+            f.write("exit 0\n")
+        rounds_before = int(stjson().get("round_count", 0))
+        pcommit("green", "存档: T9 绿实现")
+        code, d = stop_hook()
+        h2, st_b = head(), stjson()
+        jr = open(os.path.join(S, "JOURNAL.md"), encoding="utf-8").read()
+        check("G10 绿存档落地：verify 全绿 + 轮数 +1 + 日志一行 + 红票被消费",
+              d.get("decision") == "block" and "绿存档已落" in d.get("reason", "")
+              and h2 not in (h0, h1) and st_b.get("last_round_commit") == h2
+              and int(st_b.get("round_count", 0)) == rounds_before + 1
+              and st_b.get("red_commit_pending") is False
+              and f"- [存档] {h2[:10]}" in jr, str(d)[:200])
+        git("add", "-A"); git("commit", "-qm", "收尾")
+        pcommit("red", "存档: T9 又一次")
+        code, d = stop_hook()
+        check("G11 只剩状态文件的存档被拒（空档不算数）",
+              d.get("decision") == "block" and "空档" in d.get("reason", ""), str(d)[:200])
+        with open(os.path.join(S, "tasks.md"), "w", encoding="utf-8") as f:
+            f.write("- [x] T01 a\n- [x] T02 b\n- [ ] T03 c\n")
+        exam("def test_y():\n    assert False\n")
+        setp("batch_size", 5)
+        open(flag, "w").close()
+        pcommit("red", "存档: T10 红考题")
+        code, d = stop_hook()
+        check("G12 挂机时存档结果与批次顶回合并成同一次",
+              d.get("decision") == "block" and "红存档已落" in d.get("reason", "")
+              and "[挂机档]" in d.get("reason", ""), str(d)[:200])
+        os.remove(flag)
+        git("add", "-A"); git("commit", "-qm", "收尾 2")
+        exam("def test_z():\n    assert False\n")
+        pcommit("red", "存档: T11 红考题")
+        gr = os.path.join(H, "guard_rules.py")
+        os.replace(gr, gr + ".bak")
+        h3 = head()
+        code, d = stop_hook()
+        check("G13 判定核心缺席时拒绝代存档（筛查缺席就不落档）",
+              d.get("decision") == "block" and "判定核心" in d.get("reason", "")
+              and head() == h3 and "pending_commit" not in stjson(), str(d)[:200])
+        os.replace(gr + ".bak", gr)
+        git("add", "-A"); git("commit", "-qm", "收尾 3")
+        setp("last_round_commit", head())
+
+        # 记事存档：阶段切换 / 登记 / 批末落盘用的杂项档，不是一轮 TDD。
+        setp("red_commit_pending", "0")   # 手里先没有红票，才看得出记事存档发不发票
+        h4 = head()
+        with open(os.path.join(S, "spec.md"), "w", encoding="utf-8") as f:
+            f.write("# 规格\n- 新增一条验收句\n")
+        exam("def test_w():\n    assert False\n")
+        pcommit("note", "存档: 阶段切换")
+        code, d = stop_hook()
+        check("G14 记事存档夹带考题被拒（考题只能走红存档）",
+              d.get("decision") == "block" and "夹带了考题" in d.get("reason", "")
+              and "tests/exam_red.py" in d.get("reason", "")
+              and head() == h4 and "pending_commit" not in stjson(), str(d)[:200])
+        git("checkout", "--", "tests/exam_red.py")   # 考题撤回，只留 spec.md 这条台账改动
+        rounds_before = int(stjson().get("round_count", 0))
+        pcommit("note", "存档: 阶段切换")
+        code, d = stop_hook()
+        h5, st_c = head(), stjson()
+        check("G15 记事存档落地：基线前进，但不动轮数、不发红票",
+              d.get("decision") == "block" and "记事存档已落" in d.get("reason", "")
+              and h5[:10] in d.get("reason", "") and h5 != h4
+              and st_c.get("last_round_commit") == h5
+              and int(st_c.get("round_count", 0)) == rounds_before
+              and not st_c.get("red_commit_pending"), str(d)[:200])
+        with open(os.path.join(S, "spec.md"), "a", encoding="utf-8") as f:
+            f.write("- 再来一条\n")
+        pcommit("green", "存档: 想蒙混过关")
+        code, d = stop_hook()
+        check("G16 记事存档不发红票：紧跟其后的绿存档照样被拒",
+              d.get("decision") == "block" and "没有过红存档" in d.get("reason", "")
+              and head() == h5, str(d)[:200])
+        git("add", "-A"); git("commit", "-qm", "收尾 4")
+        setp("last_round_commit", head())
+
+        # ---- L 系列：取证账本 blocks.jsonl（拦了什么要留痕，顶回时要说出来）----
+        nline = lambda p: sum(1 for _ in open(p, encoding="utf-8")) if os.path.exists(p) else 0
+        setp("stage", "1")      # 出循环阶段：检测门不插话，只看取证这一条线
+        stop_hook()             # 先推平水位线，从干净起点数
+        base = nline(BLK)
+        gpre("Bash", "sed -i s/a/b/ spec.md", phase="implementing")
+        gpre("apply_patch", patch("*** Update File: tests/exam.py"))
+        rows = [json.loads(x) for x in open(BLK, encoding="utf-8").read().splitlines()
+                if x.strip()][base:] if os.path.exists(BLK) else []
+        check("L1 两次拦截留下两行取证，字段齐、相位对",
+              len(rows) == 2 and all({"ts", "tool", "target", "rule", "phase"} <= set(r) for r in rows)
+              and [r["phase"] for r in rows] == ["implementing"] * 2, str(rows)[:200])
+        with open(os.path.join(S, "tasks.md"), "w", encoding="utf-8") as f:
+            f.write("- [ ] T01 a\n- [ ] T02 b\n- [ ] T03 c\n")
+        open(flag, "w").close()
+        setp("round_count", 0); setp("batch_size", 2)
+        code, d = stop_hook()
+        check("L2 顶回理由带上本轮拦截数",
+              d.get("decision") == "block" and "拦下 2 次" in d.get("reason", ""), str(d)[:200])
+        setp("round_count", 1)
+        code, d = stop_hook()
+        check("L3 水位线已推进：同一批拦截不重复计入下一轮",
+              d.get("decision") == "block" and "[取证]" not in d.get("reason", ""), str(d)[:200])
+        os.remove(flag)
+
+        # ---- T 系列：判卷预警 tripwire（绿灯不等于没作弊；只出声，不改判决）----
+        # Codex 半边比 CC 版多一条：绿存档的 verify.sh 是钩子替模型跑的，模型看不见那段
+        # 输出——预警必须被捎进顶回理由，否则这道预警等于没做。
+        setp("stage", "4"); setp("phase", "implementing"); setp("stop_blocks", 0)
+        git("add", "-A"); git("commit", "-qm", "tripwire 起点")
+        v = run(["bash", os.path.join(H, "verify.sh")], S, env)
+        check("T1 干净轮一声不吭（预警不制造噪音）",
+              v.returncode == 0 and "判卷预警" not in v.stdout, v.stdout[-200:])
+        with open(os.path.join(S, "tests", "exam_red.py"), "w", encoding="utf-8") as f:
+            f.write("import pytest\n\n@pytest.mark.skip\ndef test_z():\n    pass\n")
+        with open(os.path.join(S, "src", "app.py"), "w", encoding="utf-8") as f:
+            f.write("# type: ignore\ndef f():\n    try:\n        return g()\n    except Exception:\n        pass\n")
+        v = run(["bash", os.path.join(H, "verify.sh")], S, env)
+        check("T2 四种作弊痕迹被逐条点名，且判决不变（还是 exit 0）",
+              v.returncode == 0 and v.stdout.count("⚠️ 判卷预警：") == 4
+              and all(k in v.stdout for k in ("抑制标记", "跳过考题", "吞异常", "删掉了")),
+              v.stdout[-400:])
+        git("checkout", "--", "tests/exam_red.py", "src/app.py")
+        setp("phase", "test-writing"); setp("last_round_commit", head())
+        exam("def test_t():\n    assert False\n")
+        pcommit("red", "存档: T12 红考题")
+        stop_hook()                      # 红票到手，基线随存档自动推进
+        setp("phase", "implementing")
+        with open(os.path.join(S, "src", "app.py"), "w", encoding="utf-8") as f:
+            f.write("# type: ignore\ndef f():\n    try:\n        return g()\n    except Exception:\n        pass\n")
+        pcommit("green", "存档: T12 绿实现")
+        code, d = stop_hook()
+        check("T3 绿存档的预警被捎回顶回理由（verify 是钩子跑的，不捎就没人看得见）",
+              d.get("decision") == "block" and "绿存档已落" in d.get("reason", "")
+              and all(k in d.get("reason", "") for k in ("判卷预警：", "抑制标记", "吞异常", "作弊清单")),
+              str(d)[:300])
+        git("add", "-A"); git("commit", "-qm", "tripwire 收尾")
 
         # ---- verify：绿灯 / 超时保险 / fail-closed ----
         with open(os.path.join(S, "tests", "run.sh"), "w", encoding="utf-8") as f:

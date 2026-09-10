@@ -9,8 +9,15 @@
   progress.py bump-cycle          # 外循环圈数 +1，round 归零
   progress.py milestone <name>    # 记录里程碑（幂等，返回 new/dup）
   progress.py journal "<一行>"    # 向 JOURNAL.md 追加一行（日志只增不减的唯一入口）
+  progress.py commit red|green|note "存档: T3 …"  # 登记存档意图，交轮末钩子代为落 commit
 """
 import json, os, subprocess, sys, datetime
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    import guard_log    # 拦截取证账本（两版共享）
+except Exception:
+    guard_log = None
 
 STAGE_NAMES = {
     "0": "Stage 0 开场体检", "1": "Stage 1 想法访谈", "2": "Stage 2 规格与规矩",
@@ -105,6 +112,14 @@ def card():
         f"任务：{done}/{total} 完成" + (f"；问题本 {blocked} 件待拍板" if blocked else ""),
         f"下一步：{NEXT_HINT.get(stage, '读 references 对应剧本')}",
     ]
+    # 围栏降级横幅：selftest 探到本机不具备实时拦截能力时会写 enforce_mode=detect。
+    # 首屏就得说，不能等违规了才说——用户有权知道今天守在门口的是几层。
+    if str(st.get("enforce_mode", "")) == "detect":
+        lines.append(
+            "⚠️ 围栏降级中（enforce_mode=detect）：本机 codex 低于 0.153 或钩子层未接通，"
+            "实时拦截（PreToolUse）不可用，只剩 OS 沙箱 + 轮末检测门——违规不会当场被拦，"
+            "但轮末必被顶回。挂机前建议先升级 codex 再重跑 selftest.sh。"
+        )
     commits, empty = count_archive_commits()
     if done > 0 and commits is not None and done > commits:
         lines.append(
@@ -116,6 +131,11 @@ def card():
             f"⚠️ 对账警告：{empty} 次任务存档是空提交（没有任何文件变更）——「完成」可能没有实体，"
             "续接前用 git show --stat 逐条核验。"
         )
+    # 拦截取证：围栏至今拦了多少次。不是罪状，是体检单——数字异常高说明
+    # 上一段挂机里模型在反复试探边界，续接前值得翻一眼账本。
+    hits = guard_log.count(root()) if guard_log is not None else 0
+    if hits:
+        lines.append(f"围栏拦截：累计 {hits} 次（明细 .loopwork/logs/blocks.jsonl）")
     print("\n".join(lines))
     return 0
 
@@ -131,6 +151,36 @@ def journal_append(line):
     with open(os.path.join(root(), "JOURNAL.md"), "a", encoding="utf-8") as jf:
         jf.write(text + "\n")
     print("ok")
+    return 0
+
+def request_commit(st, kind, msg):
+    """登记一次存档意图，交给轮末钩子（跑在沙箱外）去真正执行 git。
+
+    为什么不自己 commit：Codex 版模型跑在沙箱里，.git 写不动。存档因此不是
+    「模型说存了」，而是「围栏验过才算」——密钥筛查、相位核对、verify.sh 全过才落。
+    没有代存档钩子的版本（CC 版由模型自己 git commit）在这里直接报错：存档意图宁可
+    当场拒绝，也不能写进 state 然后没人执行、被静静吞掉。
+
+    三种存档：red 只许考题（落地发一张红票）；green 要手里有红票且 verify.sh 全绿；
+    note 是阶段切换/登记/批末落盘这类记事存档，唯独不许夹带考题——考题的唯一入口
+    是红存档，否则先红后绿的入场券就被绕开了。"""
+    if kind not in ("red", "green", "note"):
+        print('用法: progress.py commit <red|green|note> "存档: T3 …"', file=sys.stderr)
+        return 1
+    text = " ".join(str(msg).splitlines()).strip()
+    if not text:
+        print('存档要有一句话说明：commit red "存档: T3 红考题"', file=sys.stderr)
+        return 1
+    if not os.path.exists(os.path.join(root(), ".loopwork", "hooks", "stop_hook.py")):
+        print("这个项目没有代存档钩子（.loopwork/hooks/stop_hook.py 不在）——"
+              "本版由你自己执行 git add / git commit。没有登记任何待存档意图。",
+              file=sys.stderr)
+        return 1
+    st["pending_commit"] = {"kind": kind, "msg": text}
+    save(st)
+    print(f"已登记待存档（{kind}）：{text}")
+    print("轮末钩子会做密钥筛查 + 相位核对" + (" + verify.sh" if kind == "green" else "") +
+          "，全过才落 commit，结果下一轮告诉你。")
     return 0
 
 def main(argv):
@@ -171,6 +221,9 @@ def main(argv):
         print(st["cycle"])
     elif cmd == "journal":
         return journal_append(argv[2] if len(argv) > 2 else "")
+    elif cmd == "commit":
+        return request_commit(st, argv[2] if len(argv) > 2 else "",
+                              argv[3] if len(argv) > 3 else "")
     elif cmd == "milestone":
         ms = st.setdefault("milestones", [])
         if argv[2] in ms:

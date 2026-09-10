@@ -44,6 +44,6 @@
 
 - [ ] plan.md + tasks.md 定稿
 - [ ] 用户明确批准（记录原话进 JOURNAL）
-- [ ] git 存档；state.stage → 4
+- [ ] 记事存档 `progress.py commit note "存档: 计划定稿"`；state.stage → 4
 
 → 转场：「收到，开工。接下来一段时间不需要你，我每完成一条会报一行进度。你去喝咖啡，机器响了再回来。」

@@ -47,10 +47,45 @@ PYEOF
   return $code
 }
 
+# 判卷预警（tripwire）：绿灯不等于没作弊。扫本轮还没入库的改动，找几种「让考题闭嘴」
+# 的机械痕迹——只出声，绝不改 exit code。
+#
+# 为什么不做成闸门：公开抽样的 327 个 agent PR 里，自动探测器对野生作弊的独立命中是
+# 0/27（同一套规则在人工种下的样本上却有 92.6%）。这类规则擅长抓自己见过的花样，
+# 对真事基本睁眼瞎；拿它当硬闸门，收的只会是误报停机。闸门是判卷员和用户的眼睛，
+# 这里只负责把放大镜递过去。清单与出处见判卷员指令 reviewer.md。
+tripwire() {
+  git rev-parse --verify HEAD >/dev/null 2>&1 || return 0
+  local d; d="$(git diff HEAD 2>/dev/null)"
+  [ -n "$d" ] || return 0
+  local out="" n m phase files h
+  n=$(printf '%s\n' "$d" | grep -Ec '^\+[^+].*(@ts-ignore|@ts-expect-error|eslint-disable|type: *ignore|noqa|#\[allow\(|nolint)')
+  [ "$n" -gt 0 ] && out="${out}新增 $n 处抑制标记（ts-ignore / eslint-disable / type: ignore / noqa …）——被压住的那句检查原本在说什么？"$'\n'
+  n=$(printf '%s\n' "$d" | grep -Ec '^\+[^+].*(pytest\.mark\.(skip|xfail)|unittest\.skip|\.(skip|todo)\(|xit\(|xdescribe\(|t\.Skip\(|#\[ignore\])')
+  [ "$n" -gt 0 ] && out="${out}新增 $n 处跳过考题的标记（skip / xfail / todo …）——被跳过的那道题，本来是这轮该做的吗？"$'\n'
+  n=$(printf '%s\n' "$d" | grep -Ec '^\+[^+].*(catch *(\([^)]*\))? *\{ *\}|except[^:]*: *(pass|continue))')
+  m=$(printf '%s\n' "$d" | grep -E -A1 '^\+[^+].*except' | grep -Ec '^\+[[:space:]]*(pass|continue)[[:space:]]*$')
+  [ $((n + m)) -gt 0 ] && out="${out}新增 $((n + m)) 处吞异常的写法（except: pass / catch {}）——错误被咽下去，考题当然不红。"$'\n'
+  n=$(printf '%s\n' "$d" | grep -Ec '^-[^-].*(assert|expect\(|\.to(Be|Equal)|should\.)')
+  [ "$n" -gt 0 ] && out="${out}删掉了 $n 行断言——搬家就说清楚搬到哪了；删题的话，这盏绿灯不算数。"$'\n'
+  files=$(git diff HEAD --name-only 2>/dev/null)
+  phase=$(sed -n 's/.*"phase"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' .loopwork/state.json 2>/dev/null | head -1)
+  if [ "$phase" = "implementing" ] && [ -n "$files" ] &&
+     ! printf '%s\n' "$files" | grep -Ev '(^tests/|(^|/)test_|_test\.|\.spec\.|\.test\.|^\.loopwork/)' | grep -q .; then
+    out="${out}实现期里没入库的改动只碰了考题，一行实现都没动——这盏绿灯是改考题改出来的吗？"$'\n'
+  fi
+  [ -n "$out" ] || return 0
+  echo "[verify] ── 判卷预警：绿灯不等于没作弊，下面的痕迹请当面说清楚 ──"
+  printf '%s' "$out" | while IFS= read -r h; do echo "[verify] ⚠️ 判卷预警：$h"; done
+  echo "[verify]    痕迹不是判决：正当重构也会命中，真作弊也可能一条都不命中。"
+  echo "[verify]    逐条给理由，或者改回去——判卷员会照作弊清单（reviewer.md）逐条核对。"
+  return 0
+}
+
 # 探测考题运行方式：tests/run.sh 是项目自己的总裁判（只跑它）；
 # 没有总裁判时，探测到的栈全部要跑、全部要绿——只跑第一个会漏掉混合项目的另一半考题。
 if [ -f tests/run.sh ]; then
-  run "tests/run.sh" bash tests/run.sh; exit $?
+  run "tests/run.sh" bash tests/run.sh; code=$?; tripwire; exit $code
 fi
 
 RAN=0; FINAL=0
@@ -90,4 +125,5 @@ if [ "$FINAL" -eq 0 ]; then
 else
   echo "[verify] ❌ ${RAN} 个测试栈中有失败（首个失败 exit ${FINAL}）"
 fi
+tripwire
 exit $FINAL

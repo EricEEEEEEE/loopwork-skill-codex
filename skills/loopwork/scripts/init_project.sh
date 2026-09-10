@@ -15,7 +15,7 @@ cd "$PROJ"
 if [ ! -d .git ]; then git init -q; echo "[init] git 存档系统已开启"; fi
 
 # 2. 机器进驻（以标准库为准，覆盖更新）
-for f in stop_hook.py audit_log.py progress.py verify.sh; do
+for f in guard_rules.py guard_log.py guard_pre.py stop_hook.py audit_log.py progress.py verify.sh; do
   cp -f "$SKILL_DIR/scripts/$f" ".loopwork/hooks/$f"
 done
 chmod +x .loopwork/hooks/*.sh .loopwork/hooks/*.py 2>/dev/null || true
@@ -55,7 +55,10 @@ if os.path.exists(p):
         except Exception: cfg = {}
 hooks = cfg.setdefault("hooks", {})
 def cmd(c): return {"type": "command", "command": c}
+# PreToolUse 不写 matcher：Codex 侧 matcher 的 schema 没实测过，宁可全量收进来，
+# 由 guard_pre.py 自己按 tool_name 分派——没见过的工具放行并记账，不会误伤。
 WANT = {
+    "PreToolUse":   [{"hooks": [cmd("python3 .loopwork/hooks/guard_pre.py")]}],
     "SessionStart": [{"hooks": [cmd("python3 .loopwork/hooks/progress.py card")]}],
     "Stop":         [{"hooks": [cmd("python3 .loopwork/hooks/stop_hook.py")]}],
     "PostToolUse":  [{"hooks": [cmd("python3 .loopwork/hooks/audit_log.py")]}],
@@ -170,7 +173,10 @@ if [ ! -f AGENTS.md ]; then
 
 铁律指针（完整版在 loopwork skill）：
 1. 考题先红后绿；实现期间绝不改 tests/、spec.md、rules.md
-2. 勾选不是证据，存档才是——每完成一条任务 git commit + 更新基线
+2. 勾选不是证据，存档才是——存档不由你执行，你只登记：
+   \`python3 .loopwork/hooks/progress.py commit red|green|note "存档: …"\`，
+   轮末钩子验过（密钥筛查 / 只许考题 / verify 全绿）才落 commit 并自动推进基线；
+   下一轮看到「[代存档] …已落 <hash>」才算存住，看到「拒绝」就按理由重新登记
 3. 花钱/删除/发布/改规矩/密钥 五类动作无条件先问用户
 4. 要拍板的事写 BLOCKED.md 跳过，不停机干等
 5. 永不宣布「项目完成」，清单空了 = 该续单了
@@ -200,5 +206,5 @@ if ! git rev-parse HEAD >/dev/null 2>&1; then
   echo "[init] 首次存档完成"
 fi
 
-echo "[init] ✅ 「${NAME}」建家完成：git + 状态机 + Codex 钩子 + 规则 + 判卷员 + AGENTS.md"
+echo "[init] ✅ 「${NAME}」建家完成：git + 状态机 + 实时围栏(PreToolUse) + 轮末检测门/代存档 + 规则 + 判卷员 + AGENTS.md"
 echo "[init] 提醒：项目级规则/钩子需要 Codex 信任本项目后生效——首次在此项目使用 Codex 时请选择信任。"

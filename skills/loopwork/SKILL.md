@@ -12,11 +12,11 @@ description: Guides complete beginners from a raw idea to working, continuously-
 1. **先读状态，再说话**：每次被激活，第一动作是找 `.loopwork/state.json`（先看当前目录，再问用户项目在哪）。没有 → 新项目，走 Stage 0；有 → 按「点火路由」（②）续接。绝不凭记忆猜进度。
 2. **文件即记忆**：一切进度写在项目文件里（state.json / tasks.md / BLOCKED.md / JOURNAL.md）。你可以失忆，文件不会。感觉上下文丢失时：重读 state.json → 项目根 AGENTS.md → 本文件 → 当前阶段的 `references/` 剧本。
 3. **执行自主，方向人定**：阶段方向、计划批准、以及【花钱 / 删除既有文件 / 对外发布 / 修改项目规矩 / 密钥】五类动作，无条件停下等用户明确同意，且**永不**和普通「下一步」混在一起顺手带过。
-4. **考题先红后绿**：先写测试、亲眼跑红，再写实现；实现期间绝不改考题（顺序：存档红考题 → `progress.py set last_round_commit $(git rev-parse HEAD)` 推进基线 → `progress.py set phase implementing`，顺序错了检测门会把红考题当违规顶回）。
+4. **考题先红后绿**：先写测试、亲眼跑红，再写实现；实现期间绝不改考题（顺序：`progress.py commit red "存档: T{编号} 红考题"` 登记红存档 → 本轮收尾 → 下一轮拿到「红存档已落」回执 → `progress.py set phase implementing`。基线由钩子落档时自动推进，不用你手推；顺序错了检测门会把红考题当违规顶回）。
 5. **验收看证据**：只认 `bash .loopwork/hooks/verify.sh` 的 exit code、能点开的页面、N 对 M 逐条点名。永不说「应该可以了」。**勾选不是证据，存档才是。**
 6. **卡住不停机**：要用户拍板的事写进 `BLOCKED.md`（问题/背景/建议+理由），跳过做下一条，到检查点一把清算。
 7. **小白语言**：黑话首次出现必带白话比喻（词典见 `references/glossary.md`，词典是示例集非穷举）；提问一次只问一个，用**编号选择题的纯文本形式**（推荐项排第一并标注，永远有「不知道，你来定」的出口），等用户回答再问下一个。
-8. **每轮必留痕**：每完成一条任务、每切换一个阶段 = git commit（对用户叫「存档」）+ 勾掉 tasks.md + JOURNAL.md 追加一行（用 `progress.py journal "…"`，它是日志正门；**JOURNAL 只许追加**，改写/删除会被围栏拦下）+ `progress.py bump-round`。**存档即推进基线：每次 git commit 后（含红考题存档、批末落盘）立刻 `progress.py set last_round_commit $(git rev-parse HEAD)`，检测门靠它对账**。会话结束前必须状态落盘。
+8. **每轮必留痕**：每完成一条任务、每切换一个阶段都要存档 + 勾掉 tasks.md + JOURNAL.md 追加一行（用 `progress.py journal "…"`，它是日志正门；**JOURNAL 只许追加**，改写/删除会被围栏拦下）。**存档不由你执行**：你只登记意图——`progress.py commit red|green|note "存档: …"`（red 只许考题 / green 要红票 + verify 全绿 / note 是阶段切换、登记、批末落盘这类记事档，不许夹带考题）——轮末钩子跑在沙箱外，做密钥筛查 + 相位核对 + verify.sh，全过才落 commit，并自动推进基线、绿档时轮数 +1（**所以不要再调 `bump-round`，会重复计数**）。**回执才算数**：下一轮开头看到「[代存档] …已落 <hash>」才是存住了，看到「拒绝: …」就按理由处理后重新登记；永不自己宣布「已存档」。会话结束前必须状态落盘（`commit note "存档: 批末状态落盘"`）。
 9. **永不宣布「项目完成」**：只报「这一批完成」。清单空了 = 该续单了（`references/loop-mode.md`）。
 10. **不碰项目外的世界**：只在项目文件夹内动文件（系统沙箱在工作区边界上物理拦截）；密钥永不写进代码、日志或对话；绝不执行 `rm -rf`、`git push --force`（规则层已设 forbidden）。
 11. **诚实汇报**：测试红就说红并贴输出；每个脚本调用显式检查 exit code 和输出非空——**没报错 ≠ 成功**；说好 N 项交付了 M 项，逐个点名。
@@ -59,10 +59,10 @@ description: Guides complete beginners from a raw idea to working, continuously-
 
 每一轮：
 1. 取 `tasks.md` 第一条未勾任务；`progress.py set phase test-writing`；
-2. 为它写考题（从 spec.md 验收句直译），运行，**亲眼确认失败**，失败输出记 JOURNAL；先把失败考题单独存档，并立刻 `progress.py set last_round_commit $(git rev-parse HEAD)` 推进基线；
-3. `progress.py set phase implementing`；
+2. 为它写考题（从 spec.md 验收句直译），运行，**亲眼确认失败**，失败输出记 JOURNAL；登记红存档 `progress.py commit red "存档: T{编号} 红考题"`，本轮把话说完收尾，下一轮开头拿回执；
+3. 回执是「红存档已落」→ `progress.py set phase implementing`（是「拒绝」→ 按理由处理后重新登记，不许硬闯）；
 4. 写实现 → `bash .loopwork/hooks/verify.sh`：红 → 修到绿（长输出重定向 `.loopwork/logs/` 只看 tail -20）；
-5. 绿 → git commit「存档: T{编号} {任务名}」→ 勾掉任务 → `progress.py bump-round` → `progress.py set last_round_commit <新 commit hash>` → JOURNAL 一行；
+5. 绿 → JOURNAL 一行 → 勾掉任务 → 登记绿存档 `progress.py commit green "存档: T{编号} {任务名}"`（钩子会再跑一遍 verify.sh 并核对红票，全过才落，落了自动推基线 + 轮数 +1）；
 6. 要拍板的事 → BLOCKED.md → **跳过取下一条**；
 7. 做满一批（batch_size 默认 5）或撞 ★ 里程碑 → 进验收；连续 2 条受阻或 round_count 达上限（默认 20）→ 停下汇总；
 8. 同一任务失败 3 次 → 转诊断模式（读日志→修根因→只再试一次）→ 仍败进 BLOCKED。
@@ -73,10 +73,12 @@ description: Guides complete beginners from a raw idea to working, continuously-
 
 ## ⑤ 安全与纪律硬件（Codex 版的真话）
 
-- **系统沙箱**（OS 级）：工作区外不可写——这是物理墙；
+- **系统沙箱**（OS 级，第一道）：工作区外不可写——这是物理墙；
+- **实时围栏**（PreToolUse 钩子，第二道）：动手那一刻就拦——`.loopwork/hooks/guard_pre.py` 看 Bash 命令、也看 apply_patch 补丁正文里的落点，命中即顶回（0.153.4 实测拦得住：日志出现 `hook: PreToolUse Blocked`，目标文件原样保留）。⚠️ 项目级钩子要 Codex **信任本项目**后才加载；没接通时守阵地的是第一道和第三道；
 - **规则层**：`rm -rf` 族/强推/`chmod 777` 已设 forbidden，`sed -i` 会弹确认；改历史与销毁证据一族（`git commit --amend` / `rebase` / `filter-branch` / `filter-repo` / `update-ref` / `stash` / `clean`，含 `sudo` 前缀写法）同样 forbidden——**存档只增不减，改得动的历史不算证据**；要取消暂存用 `git restore --staged <路径>`，要修正就往前再存一档；
-- **检测门**（Stop 钩子）：每轮收尾快检——基线锚定对账 + 实现期碰考题/规格即被顶回要求撤销解释 + JOURNAL 与审计账本只增不减；`.loopwork/logs/audit.jsonl` 全程留痕（PostToolUse）；
-- 与 Claude Code 版的差异（对用户诚实）：CC 是「动手瞬间物理拦截」，Codex 是「边界物理墙 + 事后必然败露强制回滚」——保护等级相当，机制不同；
+- **检测门**（Stop 钩子，第三道）：每轮收尾快检——基线锚定对账 + 实现期碰考题/规格即被顶回要求撤销解释 + JOURNAL 与审计账本只增不减；`.loopwork/logs/audit.jsonl` 全程留痕（PostToolUse）；
+- **代存档**（同一个 Stop 钩子）：你跑在沙箱里，`.git` 写不动；钩子跑在沙箱外，替你落档——但落之前先验（密钥筛查 / red 只许考题 / green 要红票 + verify 全绿 / note 不许夹带考题）。**存档因此不是「你说存了」，而是「围栏验过才算」**；
+- 与 Claude Code 版的差异（对用户诚实）：两版都是三层——CC 靠 PreToolUse 钩子在动手瞬间拦，Codex 多一层 OS 沙箱的物理墙，PreToolUse 拦截同样实时生效（0.153.4 实测），代价是项目级钩子要先信任项目才加载；没接通时退回「边界物理墙 + 轮末检测门必然败露」。保护等级相当，接线方式不同；
 - 被规则/沙箱拦时：不要绕，向用户解释拦了什么、为什么，问怎么处理。
 
 ## ⑥ 语气与解锁

@@ -28,6 +28,6 @@
 1. 总结：从想法到现在，做了什么、用户拥有了什么（点名每个功能）；
 2. 宣告换挡：「从现在起我们换一种合作方式：**你出方向，我跑圈**。想加功能、发现毛病、或只是想看看它还能长成什么样——回来说一句话就是点火。」
 3. 三句话术卡（见上）再发一遍；
-4. `progress.py set stage loop` + `bump-cycle`；庆祝 `voyage_done`；git 存档。
+4. `progress.py set stage loop` + `bump-cycle`；庆祝 `voyage_done`；记事存档 `progress.py commit note "存档: 首航收尾"`。
 
 自此项目进入下半场，之后每次激活走 `loop-mode.md`。
