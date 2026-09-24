@@ -3,12 +3,21 @@
 # 0=全绿；非 0=不通过。找不到考题运行方式 => exit 3（fail closed：不确定 = 不通过）。
 # 考题挂住（交互等待/watch 模式）=> 超时保险强制终止，exit 124（默认 300s，LOOPWORK_VERIFY_TIMEOUT 可调）。
 set -u
-ROOT="${CLAUDE_PROJECT_DIR:-${CODEX_PROJECT_DIR:-$(pwd)}}"
+# 项目根：脚本装在 <根>/.loopwork/hooks/ 就往上两级（跟会话从哪个子目录启动无关）；
+# 不在那里（直接跑仓库副本）才看 CLAUDE_PROJECT_DIR，再不然就是当前目录。
+SELF="$(cd "$(dirname "$0")" && pwd)"
+case "$SELF" in
+  */.loopwork/hooks) ROOT="${SELF%/.loopwork/hooks}" ;;
+  *) ROOT="${CLAUDE_PROJECT_DIR:-$(pwd)}" ;;
+esac
 cd "$ROOT" || exit 3
 mkdir -p .loopwork/logs
 # 日志只留最近 20 份（含本次），防跑几百轮后把仓库塞满
 ls -t .loopwork/logs/verify-*.log 2>/dev/null | tail -n +20 | while IFS= read -r old; do rm -f "$old"; done
 LOG=".loopwork/logs/verify-$(date +%Y%m%d-%H%M%S).log"
+# 全绿章：只盖在日志末尾。CC 版存档闸（guard_bash.verify_stale）认的就是这一行——
+# 最新一份 verify-*.log 得比所有待存实现文件新，且以这一行收尾，绿存档才放行。
+stamp_ok() { echo "[verify] ✅ 全绿 (exit 0)" >> "$LOG"; }
 TIMEOUT_S="${LOOPWORK_VERIFY_TIMEOUT:-300}"
 export CI=true   # 测试框架一律走非交互模式（jest/vitest 据此关掉 watch）
 
@@ -85,7 +94,9 @@ tripwire() {
 # 探测考题运行方式：tests/run.sh 是项目自己的总裁判（只跑它）；
 # 没有总裁判时，探测到的栈全部要跑、全部要绿——只跑第一个会漏掉混合项目的另一半考题。
 if [ -f tests/run.sh ]; then
-  run "tests/run.sh" bash tests/run.sh; code=$?; tripwire; exit $code
+  run "tests/run.sh" bash tests/run.sh; code=$?
+  if [ "$code" -eq 0 ]; then stamp_ok; fi
+  tripwire; exit $code
 fi
 
 RAN=0; FINAL=0
@@ -122,6 +133,7 @@ if [ "$RAN" -eq 0 ]; then
 fi
 if [ "$FINAL" -eq 0 ]; then
   echo "[verify] ✅ 共 ${RAN} 个测试栈全部通过"
+  stamp_ok
 else
   echo "[verify] ❌ ${RAN} 个测试栈中有失败（首个失败 exit ${FINAL}）"
 fi

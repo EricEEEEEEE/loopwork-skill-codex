@@ -7,22 +7,26 @@
   Codex：guard_pre.py（PreToolUse）
 判定归一份代码管，才不会「一版补了洞、另一版还漏着」——这是两版同步的单一真相源。
 
-对外五个函数（前三个命中返回元组，干净返回 None）：
+对外七个函数（前三个命中返回元组，干净返回 None；后两个是实现期 tests 白名单的判定）：
   check_bash(cmd, phase="", in_project=False, extra_protected=()) -> None | (rule, 理由)
   check_edit(rel, phase="", extra_protected=())                   -> None | (rule, 理由)
   looks_like_secret(name, body="")                                -> None | 理由
   impl_files(files)                                               -> 清单里的「实现物」路径
   progress_sig(head, blobs)                                       -> 本轮末进展快照的短指纹
+  tests_infra_ok(rel)                                             -> 实现期也放行的 tests 夹具/基础设施？
+  infra_passes(cmd, phase="", in_project=False, extra_protected=()) -> 只因白名单才放行？（记 allowed.jsonl 用）
 rule 是短标识（写进 .loopwork/logs/blocks.jsonl 取证用）；理由是给模型看的整句白话，
 调用方原样打到 stderr，前面加自己的 `[围栏]` 抬头。
 
 约定：路径一律用调用方算好的「项目内相对路径」，本模块不做 realpath——
 符号链接还原、大小写归一属于 I/O 与平台差异，归适配层。
 """
-import hashlib, re
+import hashlib, posixpath, re
 
 # ---------- 清单（两版共享的规则本体）----------
 
+# 强推 / 全开权限的主判定已改走 push_force() / chmod_world_open()（会跳过 git 全局选项、
+# 识别 -R 0777 / a+rwx 这类写法）；下面三条 push 正则和一条 chmod 正则保留作第二道网。
 DANGEROUS = [
     (r"\bgit\s+push\s+.*--force", "push-force",
      "git push --force 被围栏拦下：会抹掉远端历史，必须用户亲自决定。"),
@@ -78,6 +82,32 @@ SECRET_BODY = [
 def append_ok(target):
     """这个保护路径是不是「只许追加」的那一类。"""
     return any(a in target for a in APPEND_ONLY)
+
+
+# 实现期 tests/ 整目录上锁，但夹具/基础设施不是考题：conftest.py、tests/_infra/**、
+# tests/fixtures/** 在实现期放行（写实现时常要补一个 fixture 或一条 conftest 接线）。
+# 边界从严：白名单目录里 test_ 开头 / _test.py 结尾的文件仍按考题锁；每次放行由适配层
+# 记一行 allowed.jsonl（rule=tests-infra），事后查得出「实现期到底动了 tests/ 里的什么」。
+TESTS_INFRA = ("tests/conftest.py",)
+TESTS_INFRA_DIRS = ("tests/_infra/", "tests/fixtures/")
+
+
+def tests_infra_ok(rel):
+    """rel（项目内相对路径，任意写法）是不是实现期也放行的 tests 基础设施。
+    先归一：反斜杠、引号、./ 前缀、大小写、`..` 段（tests/_infra/../../x 这种绕法归一后就露馅）。
+    白名单目录本身（tests/fixtures、tests/_infra）不算：cp/mv 到目录时落点文件名未知，
+    可能就是个 test_ 文件——要放行就写到具体文件名（cp x.py tests/fixtures/x.py）。"""
+    low = str(rel).replace("\\", "/").strip().strip('"').strip("'").casefold()
+    while low.startswith("./"):
+        low = low[2:]
+    low = posixpath.normpath(low) if low else low
+    if low in TESTS_INFRA:
+        return True
+    for d in TESTS_INFRA_DIRS:
+        if low.startswith(d):
+            name = low.rsplit("/", 1)[-1]
+            return not (name.startswith("test_") or name.endswith("_test.py"))
+    return False
 
 
 def impl_files(files):
@@ -188,15 +218,63 @@ def git_rewrite_ban(cmd):
     return None
 
 
-def write_target_hit(cmd, targets):
+def push_force(cmd):
+    """git push 带强推形态即拦：--force / --force-with-lease / --force-if-includes、
+    合写短旗标里带 f（-f / -uf / -fu）、+refspec。走 git_calls() 跳过 git 全局选项
+    （-C <dir> / -c k=v / --no-pager …），`git -C . push -f` 这种写法才躲不掉。
+    --no-force-with-lease 之类的否定旗标不算。命中返回白话原因，否则 None。"""
+    for sub, args in git_calls(cmd):
+        if sub != "push":
+            continue
+        for a in args:
+            if a.startswith("--force"):
+                return f"{a} 会抹掉远端历史"
+            if re.fullmatch(r"-[a-zA-Z]*f[a-zA-Z]*", a):
+                return f"{a} 等于 --force，会抹掉远端历史"
+            if a.startswith("+") and len(a) > 1:
+                return f"+refspec（{a}）等于强推，会抹掉远端历史"
+    return None
+
+
+def chmod_world_open(cmd):
+    """chmod 把权限全开（任何人可读写执行）即拦。按段分词，跳过 -R / -v / -f 这类旗标
+    （以及 -w 这种「去权限」的符号模式——它不可能把权限打开），第一个非旗标 token 当模式：
+      八进制：末三位是 777（777 / 0777 / 4777 / 07777）
+      符号式：某个子句给 other（o / a / ugo / 省略 who）同时加上 r、w、x（+ 或 =）
+    u+x、755、a+rwX（大写 X 不给普通文件加执行位）、o-w 都放行。命中返回模式串，否则 None。"""
+    for seg in re.split(SEP, cmd):
+        for m in re.finditer(r"\bchmod\b(.*)", seg):
+            toks = [t for t in m.group(1).split() if not t.startswith("-")]
+            if not toks:
+                continue
+            mode = toks[0]
+            if re.fullmatch(r"[0-7]+", mode):
+                if mode[-3:] == "777":
+                    return mode
+                continue
+            for clause in mode.split(","):
+                cm = re.fullmatch(r"([ugoa]*)([+=])([rwxXst]+)", clause)
+                if not cm:
+                    continue
+                who, _, perms = cm.groups()
+                if (not who or "a" in who or "o" in who) and all(c in perms for c in "rwx"):
+                    return mode
+    return None
+
+
+def write_target_hit(cmd, targets, exempt=None):
     """只有当写动作『指向』保护路径才算命中——提到路径不算（跑考题 pytest tests/ 必须放行）。
-    大小写不敏感比对（macOS 文件系统默认不区分）。返回命中的保护路径，未命中返回 None。"""
+    大小写不敏感比对（macOS 文件系统默认不区分）。返回命中的保护路径，未命中返回 None。
+    exempt(token) 为真的落点不算命中（实现期 tests 基础设施白名单，见 tests_infra_ok）。"""
+    ex = exempt or (lambda tok: False)
     # 1) 重定向落点：> 或 >> 后面的那个 token（只许追加的文件放行 >>，拦 >）
     for m in re.finditer(r"(>>?)\s*([^\s;|&<>]+)", cmd):
         op, tok = m.group(1), m.group(2).lower()
         for t in targets:
             if t in tok:
                 if op == ">>" and append_ok(t):
+                    continue
+                if ex(tok):
                     continue
                 return t
     # 2) 写型命令的参数区：按管道/分号/换行切段，每段里每个匹配都要看（不能只看第一个）。
@@ -209,7 +287,10 @@ def write_target_hit(cmd, targets):
                 if t in args:
                     if appending and append_ok(t):
                         continue
-                    return t
+                    # 参数区按 token 看：命中的 token 全部被豁免才放行（tests/x.py 和 tests/conftest.py
+                    # 同时出现时，考题那个 token 仍然算命中）
+                    if any(t in tok and not ex(tok) for tok in args.split()):
+                        return t
         # cp 只有目的地算写：从考题目录拷出去是读，必须放行。
         # 目的地通常是最后一个参数，但 -t <目录> / --target-directory=<目录> 会把它挪到前面。
         for m in re.finditer(r"\bcp\b(.*)", seg):
@@ -225,7 +306,7 @@ def write_target_hit(cmd, targets):
                 dest = toks[-1] if toks else None
             if dest:
                 for t in targets:
-                    if t in dest:
+                    if t in dest and not ex(dest):
                         return t
         # 3) 删也是写的一种：删掉围栏脚本/接线/批次 flag 等于把围栏关掉。
         #    普通文件的 rm 不受影响（只看参数是否落在保护清单上）。
@@ -234,7 +315,7 @@ def write_target_hit(cmd, targets):
                 if tok.startswith("-"):
                     continue
                 for t in targets:
-                    if t in tok:
+                    if t in tok and not ex(tok):
                         return t
     return None
 
@@ -264,7 +345,13 @@ def check_bash(cmd, phase="", in_project=False, extra_protected=()):
     """
     if dangerous_rm(cmd):
         return ("rm-rf", "rm -rf 类命令被围栏拦下：删除动作必须先问用户，并改用精确路径删除。")
-    for pat, rule, msg in DANGEROUS:
+    pf = push_force(cmd)
+    if pf:
+        return ("push-force", f"git push 强推被围栏拦下：{pf}，必须用户亲自决定。")
+    wo = chmod_world_open(cmd)
+    if wo:
+        return ("chmod-777", f"chmod {wo} 被围栏拦下：不做全开权限（任何人可读写执行）。")
+    for pat, rule, msg in DANGEROUS:   # 第二道网：老正则原样保留
         if re.search(pat, cmd):
             return (rule, msg)
     ban = git_rewrite_ban(cmd)
@@ -281,7 +368,7 @@ def check_bash(cmd, phase="", in_project=False, extra_protected=()):
             return ("git-touch-exam",
                     f"拦截：实现期不许用 git {g[0]} 改写考题/历史（{g[1]}）。"
                     "红考题只能靠写实现变绿；确需回滚或打补丁，停下来向用户说明并征得同意。")
-    hit = write_target_hit(cmd, targets)
+    hit = write_target_hit(cmd, targets, exempt=(tests_infra_ok if str(phase) == "implementing" else None))
     if hit:
         tail = ('只许追加：记一笔用 `python3 .loopwork/hooks/progress.py journal "…"`，或 `>>` / `tee -a`。'
                 if append_ok(hit)
@@ -289,6 +376,15 @@ def check_bash(cmd, phase="", in_project=False, extra_protected=()):
         rule = "append-only" if append_ok(hit) else "write-protected"
         return (rule, f"拦截：这条命令在用 shell 改写或删除保护文件（{hit}）。{tail}")
     return None
+
+
+def infra_passes(cmd, phase="", in_project=False, extra_protected=()):
+    """这条 shell 命令是不是只因 tests 基础设施白名单才放行的（适配层据此记 allowed.jsonl）。
+    判法：白名单关掉再判一次，严判命中 → 说明刚才是白名单救的。只在实现期有意义。"""
+    if str(phase) != "implementing" or not in_project:
+        return False
+    targets = list(PROTECT_ALWAYS) + [str(x).lower() for x in extra_protected] + PROTECT_IMPL
+    return write_target_hit(cmd, targets) is not None
 
 
 def check_edit(rel, phase="", extra_protected=()):
@@ -312,6 +408,8 @@ def check_edit(rel, phase="", extra_protected=()):
                     f"拦截：{rel} 受保护。围栏脚本与钩子接线不许改；"
                     "状态请用 progress.py 更新；批次开关归用户和 Stop 钩子。")
     if str(phase) == "implementing":
+        if low.startswith("tests/") and tests_infra_ok(low):
+            return None      # 夹具/基础设施不是考题：放行（适配层会记 allowed.jsonl）
         if low.startswith("tests/") or low in ("spec.md", "rules.md"):
             return ("impl-locked",
                     f"拦截：现在是实现阶段，{rel} 已锁定（考题先红后绿，写实现期间不许改考题/规格/规矩）。"

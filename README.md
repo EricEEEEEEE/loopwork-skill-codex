@@ -1,6 +1,6 @@
 # Loopwork Skill · Codex Edition
 
-![version](https://img.shields.io/badge/version-2.0-blue) ![status](https://img.shields.io/badge/status-beta-orange) ![license](https://img.shields.io/badge/license-MIT-blue) ![codex](https://img.shields.io/badge/OpenAI_Codex-%E2%89%A5_0.153-10a37f) ![lang](https://img.shields.io/badge/%E4%B8%AD%E6%96%87-first-red)
+![version](https://img.shields.io/badge/version-2.1-blue) ![status](https://img.shields.io/badge/status-beta-orange) ![license](https://img.shields.io/badge/license-MIT-blue) ![codex](https://img.shields.io/badge/OpenAI_Codex-%E2%89%A5_0.153-10a37f) ![lang](https://img.shields.io/badge/%E4%B8%AD%E6%96%87-first-red)
 
 **A drop-in OpenAI Codex skill that turns a complete beginner's idea into working, continuously-evolving software — through a guided loop workflow.**
 
@@ -12,7 +12,7 @@
 
 **第 1 步 · 下载**：点本页绿色 **Code** 按钮 → **Download ZIP** → 解压。（会 git：`git clone https://github.com/EricEEEEEEE/loopwork-skill-codex.git`）
 
-**第 2 步 · 安装**：把 **`skills/loopwork` 文件夹**放进（两个位置都放，兼容新旧版本）：
+**第 2 步 · 安装**：把 **`skills/loopwork` 文件夹**放进 `~/.codex/skills/loopwork`（必需）；`~/.agents/skills/loopwork` 是可选的新开放标准路径，有就双写、没有不影响生效：
 
 - `~/.codex/skills/loopwork`
 - `~/.agents/skills/loopwork`
@@ -32,7 +32,7 @@ git clone https://github.com/EricEEEEEEE/loopwork-skill-codex.git /tmp/lwc \
 
 > 我想做一个记账工具，但我不会编程
 
-显式调用：`$loopwork`（注意是 `$` 不是 `/`——Codex 的规矩），或从 `/skills` 列表选中。装完建议跑一次 30 秒自检：`bash ~/.codex/skills/loopwork/scripts/selftest.sh`
+显式调用：`$loopwork`（注意是 `$` 不是 `/`——Codex 的规矩），或从 `/skills` 列表选中。装完在项目根目录跑一次 30 秒自检：`bash ~/.codex/skills/loopwork/scripts/selftest.sh`（建家后项目里也有一份 `.loopwork/hooks/selftest.sh`；自检会记下 `.codex/hooks.json` 指纹，定义一变就提醒你回 TUI `/hooks` 重新信任）
 
 你全程只做三件事：**回答问题、看结果、点批准**。中途随时关掉，回来说「继续」就能接上。
 
@@ -60,20 +60,21 @@ skills/loopwork/
     ├── progress.py        # 状态机 + 进度卡 + 存档登记（与 CC 版字节相同）
     ├── guard_rules.py     # 围栏规则内核：纯函数、无 I/O（与 CC 版字节相同）
     ├── guard_pre.py       # PreToolUse 实时围栏：Bash 命令 + apply_patch 补丁落点
-    ├── guard_log.py       # 拦截取证：blocks.jsonl（只增不减）
+    ├── guard_log.py       # 取证账本：blocks.jsonl / tools_seen.jsonl / allowed.jsonl / hook_heartbeat.json（只增不减）
     ├── stop_hook.py       # 检测门 + 代存档 + 挂机档（基线锚定 / 相位纪律 / 外部计数）
     ├── audit_log.py       # PostToolUse 全量审计日志
-    └── selftest.sh        # 装机自检：30 秒探明你这台机器的围栏能力面
+    ├── interrupt_log.py   # Interrupt 钩子：只记一行 interrupts.jsonl，不做任何动作（平台硬上限 3s）
+    └── selftest.sh        # 装机自检：30 秒探明围栏能力面 + 记 hooks.json 指纹（建家时也进驻到项目）
 ```
 
 ## Discipline, honestly（纪律与诚实）
 
-围栏三层，外加一条「存档由围栏代落」。每一条都有实测依据，逐条列在 [VERIFICATION.md](VERIFICATION.md)（2026-09-10 / codex-cli 0.153.4）：
+围栏三层，外加一条「存档由围栏代落」。每一条都有实测依据，逐条列在 [VERIFICATION.md](VERIFICATION.md)（2026-09-10 / codex-cli 0.153.4 实测；2026-09-24 / 0.155.0-alpha.16 离线复核，见其「2026-09-24 复核」一节）：
 
 - **第一层 · OS 物理墙**：工作区外不可写，**`.git` 对模型也不可写**（Seatbelt 实测）。改不动历史，就伪造不了证据；
-- **第二层 · 实时围栏（PreToolUse）**：动手那一刻拦。`guard_pre.py` 既看 Bash 命令，也看 `apply_patch` 补丁正文里的落点——0.153.4 实测拦得住（日志出现 `hook: PreToolUse Blocked`，目标文件原样保留）。⚠️ 项目级钩子要**先信任本项目**才加载，未信任时静默不跑（实战最常见的失效点，selftest 第 5 项专门探它）；
+- **第二层 · 实时围栏（PreToolUse）**：动手那一刻拦。`guard_pre.py` 既看 Bash 命令，也看 `apply_patch` 补丁正文里的落点——0.153.4 实测拦得住（日志出现 `hook: PreToolUse Blocked`，目标文件原样保留）。⚠️ 项目级钩子要**先信任本项目**才加载，未信任时静默不跑（实战最常见的失效点，selftest 第 [7] 项专门讲它并记 hooks.json 指纹）；
 - **第三层 · 检测门（Stop 钩子）**：每轮收尾快检——基线锚定对账 + 实现期碰考题/规格即被顶回 + JOURNAL 与审计账本只增不减。**顶回自带刹车**：Codex 平台不给顶回设上限（实测连续 12 次全部生效），所以围栏自己数到 7 就放行交还用户；
-- **代存档**：模型跑在沙箱里写不了 `.git`，钩子跑在沙箱外可以——所以模型只**登记**存档意图（`progress.py commit red|green|note`），钩子核验后才落 commit：密钥筛查 / red 只许考题 / green 要红票 + `verify.sh` 全绿 / note 不许夹带考题。**存档不是「AI 说存了」，是「围栏验过才算」**；
+- **代存档**：模型跑在沙箱里写不了 `.git`，钩子跑在沙箱外可以——所以模型只**登记**存档意图（`progress.py commit red|green|note`），钩子核验后才落 commit：密钥筛查 / red 只许考题 / green 要红票 + `verify.sh` 全绿 / note 不许夹带考题。**存档不是「AI 说存了」，是「围栏验过才算」**；代存档挑着收：红档只收 tests/ 与台账，仓库根上其他新文件不自动入档并在回执里点名；
 - **规则禁令**：`rm -rf` 族 / force push / `chmod 777` / 改历史与销毁证据一族（`amend`/`rebase`/`filter-branch`/`stash`/`clean`）直接 forbidden（项目级 Starlark 规则）；
 - **只读判卷员**：`sandbox_mode="read-only"` 的原生子代理，系统层保证只看不改；
 - **外部计数**：批次/轮数上限由脚本数，不靠模型自数；验收只认 `verify.sh` 的 exit code（fail closed）。
@@ -87,7 +88,7 @@ skills/loopwork/
 - **命令行匹配面永远有缝**。`guard_pre.py` 读的是命令文本，所以解释器一行程序（`python3 -c "open('tests/a.py','w')…"`）、变量间接（`X=tests; sed -i "" … $X/a.py`）、以及各种拼接写法都可能不命中。**这正是第三层检测门存在的理由**：绕过实时围栏改了考题，轮末基线对账照样把它翻出来——两层的缝不重合，才是覆盖面。
 - **项目未被信任 = 第二、三层整体不加载，且不报错**。这是本版最危险的静默失效点：你以为围栏在，其实只剩 OS 沙箱。**首次使用必须盯着看一轮**，轮末出现「[挂机档] …」才算接通（VERIFICATION.md 实测 #7）。
 - **用户自己终端里敲的命令不经过围栏**。这是特性不是缺陷：关批的开关只在你手上（`rm .loopwork/batch.flag`），模型删不掉。反过来说，你在自己终端里做的任何事，围栏一概不知情。
-- **版本漂移**。Codex alpha 通道日更，钩子字段形状、沙箱行为、信任门语义都可能变。VERIFICATION.md 里每条结论都带日期和版本号，**装机后请跑 `selftest.sh` 以你自己的版本为准**——本仓库的实测是 2026-09-10 / 0.153.4 那一天的事实，不是永久承诺。
+- **版本漂移**。Codex alpha 通道日更，钩子字段形状、沙箱行为、信任门语义都可能变。VERIFICATION.md 里每条结论都带日期和版本号，**装机后请跑 `selftest.sh` 以你自己的版本为准**——本仓库的实测是 2026-09-10 / 0.153.4 那一天的事实（2026-09-24 在 0.155.0-alpha.16 上离线复核过机器层，实时拦截未重测），不是永久承诺。
 - **姊妹版有一条对称的坑**：Claude Code 版的检测门依赖平台顶回，而 `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP=0` 能把顶回整个关掉。两版的静默失效点不同，但都存在。
 
 ## 围栏管不到的地方：第三方 skill 是供应链（这一个也是）
@@ -100,9 +101,19 @@ skills/loopwork/
 
 Stage 0 的体检会把这几条讲给用户，并报出「这个项目里除了 loopwork 还挂着谁」。
 
+## 信任门 SOP（装机与每次升级后）
+
+Codex 按**定义哈希**逐条信任项目级钩子：`.codex/hooks.json` 内容一变，之前的信任就作废，围栏静默不跑、不报错。所以：
+
+1. 首次在项目里用 Codex → 信任本项目；
+2. 进 TUI 敲 `/hooks`，逐条审核并信任 Loopwork 的五个钩子（PreToolUse / SessionStart / Stop / PostToolUse / Interrupt）；
+3. 每次升级技能（重跑 `init_project.sh`、或手改 `hooks.json`）→ 回到第 2 步；init 在 `hooks.json` 变动时会打印 ⚠️ 提醒，selftest 第 [7] 项会比对上次指纹；
+4. 验证只有一个办法：新开会话第一屏出现进度卡（SessionStart 钩子）——看到才算生效；
+5. `--dangerously-bypass-hook-trust` 只许排障单次用，不许当常态。
+
 ## Status
 
-**v2.0；105-case machine regression green（`python3 tests/test_codex_machines.py` 可复跑）；Stop 钩子接通、代存档、挂机批与优雅停批已在真项目上跑通一整轮**（记录见 [VERIFICATION.md](VERIFICATION.md) 「真项目跑通记录 · 2026-09-11」）。真实小白 field test 仍待首跑。Codex alpha 通道日更，装机后请跑 selftest 以你的版本为准。Treat as beta.
+**v2.1；171-case machine regression green（`python3 tests/test_codex_machines.py` 可复跑）；Stop 钩子接通、代存档、挂机批与优雅停批已在真项目上跑通一整轮**（记录见 [VERIFICATION.md](VERIFICATION.md) 「真项目跑通记录 · 2026-09-11」）。真实小白 field test 仍待首跑。Codex alpha 通道日更，装机后请跑 selftest 以你的版本为准。Treat as beta.
 
 ## License
 

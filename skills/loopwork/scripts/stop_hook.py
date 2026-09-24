@@ -3,14 +3,19 @@
 
 顺序：
 0. 代存档（state.pending_commit 有登记时）：模型跑在沙箱里，.git 写不动；钩子跑在
-   沙箱外，替它把存档落下去。落之前先验：改动清单 → 密钥筛查 → red 只许考题、
-   green 要 verify.sh 全绿且手里有红存档票（先红后绿）、note（阶段切换/登记/批末落盘
-   这类记事存档）不许夹带考题。验不过就拒绝并清掉登记。
+   沙箱外，替它把存档落下去。落之前先验：改动清单 → 按档种挑该入档的（stage_plan：
+   red 只收考题和台账，note 不收考题，仓库根上的新文件谁都不收，围栏脚本谁都不收，
+   实现期的考题/规格/规矩 note 也不收）→ 只对要入档的做密钥筛查 → green 要 verify.sh
+   全绿且手里有红存档票（先红后绿）。两条硬拒绝：red 只在 test-writing 相位受理（实现期
+   补考题先 progress.py set phase test-writing，会留审计）；green 遇到受保护文件有未存档
+   改动直接拒绝——判卷不能在动过手脚的考题或判卷员上进行，收了就是替偷改洗白。
+   其余验不过就拒绝并清掉登记；没挑上的留在工作区、在回执里点名，不整档拒绝。
    落成了推进基线、green 时轮数 +1 并记一行 JOURNAL，结果并进本轮那一次顶回告诉模型。
    ——存档因此不是「模型说存了」，而是「围栏验过才算」。
 1. 检测门（快检，永远执行）：
    a. 基线锚定：state.last_round_commit 必须仍在 git 历史中可达（防 amend/rebase 假历史）；
-   b. 相位纪律：phase==implementing 时，受保护文件（tests/ spec.md rules.md）分两段核对——
+   b. 相位纪律：phase==implementing 时，受保护文件（tests/ 除基础设施白名单、.loopwork/hooks/、
+      spec.md rules.md）分两段核对——
       未存档改动（工作区/未跟踪）→ 顶回要求撤销；
       已存档改动（基线..HEAD）→ 代存档会自动推进基线，所以这里多半是人手动 commit 的，
       顶回教它对齐基线或坦白。
@@ -42,8 +47,14 @@ MAX_STALLS = 2  # 连续 N 次顶回「一点进展都没有」→ 判定打转�
 MAX_BLOCKS = 7  # 顶回总数上限 → 优雅停机。与 CC 版同数，方便两版对照排障
 VERIFY_TIMEOUT = 330    # 比 verify.sh 自己的 300s 保险丝多留一点，让它先自杀
 SCAN_MAX_BYTES = 512 * 1024   # 单文件密钥筛查上限，超了只查文件名——轮末不做全盘扫描
-# 红存档允许的非考题落点：清单住在 guard_rules.RED_ALLOWED（两版共享），
-# 判定走 guard_rules.impl_files()——CC 版的存档闸量的是同一把尺，两边不许各说各话。
+# 代存档按档种挑落点（stage_plan），不再 git add -A 一把抓：
+#   red   只收 tests/ 和台账（guard_rules.RED_ALLOWED，两版共享——CC 版的存档闸量的是同一把尺）；
+#   green 收所有已跟踪改动 + 子目录里的新文件 + 仓库根上的台账（LEDGER_ROOT）；
+#   note  同 green，但考题不收（考题只能走红存档）。
+# 仓库根上的其他新文件（scratch.txt 之类）一律不自动收：进不进仓库由用户在沙箱外拍板。
+# 另有 fence_held：围栏脚本（.loopwork/hooks/）任何档种任何时候不代收；实现期的考题/规格/规矩
+# green 直接拒档、note 不收——代存档不能成为绕过实时围栏、把偷改落进历史的后门。
+LEDGER_ROOT = ("spec.md", "rules.md", "tasks.md", "JOURNAL.md", "BLOCKED.md", "PROJECT.md")
 
 def sh(args, cwd, timeout=20, strip=True):
     try:
@@ -122,31 +133,84 @@ def hits_note(n):
     return (f"\n[取证] 本轮实时围栏拦下 {n} 次动作（明细 .loopwork/logs/blocks.jsonl）。"
             "同一面墙撞两次以上就别再找绕路了：改走合规路径，或写进 BLOCKED.md 交给用户拍板。")
 
-def protected(lines):
-    """受保护文件 = 考题/规格/规矩 + 围栏自己（改围栏脚本等于把围栏关掉，任何借口都不行）。"""
-    return [l for l in lines
-            if l.startswith("tests/") or l.startswith(".loopwork/hooks/")
-            or l in ("spec.md", "rules.md")]
+def is_protected(p):
+    """受保护文件 = 考题/规格/规矩 + 围栏自己（改围栏脚本等于把围栏关掉，任何借口都不行）。
+    tests/ 里的基础设施（conftest / _infra / fixtures，见 guard_rules.tests_infra_ok）实现期
+    本就放行，这里同样不算受保护——否则实时围栏放过去的改动到轮末又被顶回，规矩自相矛盾。
+    判定核心缺席时从严：tests/ 下全部算受保护。"""
+    if p.startswith(".loopwork/hooks/") or p in ("spec.md", "rules.md"):
+        return True
+    if p.startswith("tests/"):
+        return guard_rules is None or not guard_rules.tests_infra_ok(p)
+    return False
 
-def changed_files(root):
-    """本次存档会带上的路径清单（仓库根相对）。git 读不出来返回 None。
+def protected(lines):
+    return [l for l in lines if is_protected(l)]
+
+def fence_held(p, phase):
+    """代存档不代收的路径：围栏脚本任何时候不收；考题/规格/规矩在实现期不收。
+    收了等于替模型把「实现期偷改考题」落进历史——实时围栏拦在前面，这里是最后一道。"""
+    if p.startswith(".loopwork/hooks/"):
+        return True
+    return phase == "implementing" and is_protected(p)
+
+def changed_entries(root):
+    """工作区改动清单 [(XY, 路径)]（仓库根相对；XY 是 porcelain 的两位状态码，未跟踪是 ??）。
+    git 读不出来返回 None。
     -z：文件名里有空格/引号时 porcelain 的引号转义会把路径读歪。
     -uall：默认会把整个未跟踪目录折成一行 `secrets/`，里头的文件就永远过不了密钥筛查。"""
     code, out = sh(["git", "status", "--porcelain", "-z", "-uall"], root, strip=False)
     if code != 0:
         return None
     items = [x for x in out.split("\0") if x]
-    files, i = [], 0
+    ents, i = [], 0
     while i < len(items):
         it = items[i]
         i += 1
         if len(it) < 4:
             continue
-        files.append(it[3:])
-        if it[0] in ("R", "C") and i < len(items):  # 改名/复制：原路径是紧随的下一段
-            files.append(items[i])
+        xy = it[:2]
+        ents.append((xy, it[3:]))
+        if xy[0] in ("R", "C") and i < len(items):  # 改名/复制：原路径是紧随的下一段
+            ents.append((xy, items[i]))
             i += 1
-    return files
+    return ents
+
+def stage_plan(kind, ents, phase=""):
+    """按档种把改动清单分成 (要入档, 留在工作区)。留下的不是丢弃：回执里会点名。
+    red：只收 tests/ 和台账；green：已跟踪改动 + 子目录新文件 + 根上台账；note：同 green 但不收考题。
+    green/note 另外不收 fence_held 的路径（围栏脚本任何时候、受保护文件在实现期）。"""
+    take, skip = [], []
+    for xy, p in ents:
+        if kind == "red":
+            ok = p.startswith("tests/") or p in guard_rules.RED_ALLOWED
+        else:
+            ok = xy != "??" or "/" in p or p in LEDGER_ROOT
+            if kind == "note" and p.startswith("tests/"):
+                ok = False
+            if fence_held(p, phase):
+                ok = False
+        (take if ok else skip).append(p)
+    return take, skip
+
+def skipped_note(kind, skip, phase=""):
+    """回执里点名没入档的路径：留在工作区的东西不会丢，但得让模型和用户都知道它在那儿。
+    其中受保护路径（fence_held）不是「待收」而是「待撤销」——回执里要说清，别让模型换个档种再试。"""
+    if not skip:
+        return ""
+    why = {"red": "红档只收 tests/ 和台账；实现文件等绿存档再收，其余留在工作区",
+           "note": "记事档不收考题（考题走红存档）；仓库根上的新文件也不自动收",
+           }.get(kind, "仓库根上的新文件不自动收，留在工作区")
+    held = [p for p in skip if fence_held(p, phase)]
+    if held:
+        why += "；受保护路径（围栏脚本任何时候、考题/规格/规矩在实现期）不代收"
+    shown = ", ".join(skip[:8]) + (f" 等 {len(skip)} 项" if len(skip) > 8 else "")
+    text = (f" 未入档（{why}）：{shown}。留在工作区的东西不会丢：该入档的下次按对应档种再收；"
+            "仓库根上的新文件由用户拍板（沙箱外 git add，或写进 .gitignore）。")
+    if held:
+        text += (" 其中受保护路径（" + ", ".join(held[:4]) + "）不是「待收」而是「待撤销」："
+                 "git checkout -- <文件> / 删掉新建文件；若是用户升级围栏，请用户在沙箱外亲手 commit。")
+    return text
 
 def secret_hits(root, files):
     """对将要入库的文件做密钥筛查（文件名一层 + 内容一层）。返回白话理由列表。"""
@@ -202,32 +266,40 @@ def archive_pending(root, st):
     if guard_rules is None:
         return reject("判定核心 guard_rules.py 不在 .loopwork/hooks/，密钥筛查做不了——"
                       "筛查缺席就不代存档。请重跑 init_project.sh 补齐围栏。")
-    files = changed_files(root)
-    if files is None:
+    phase = str(st.get("phase", ""))
+    if kind == "red" and phase == "implementing":
+        return reject("红存档要在 test-writing 相位登记（现在是 implementing）。实现期改考题是偷改，"
+                      "不能借红存档洗白：真要补考题，先 progress.py set phase test-writing（会留审计）"
+                      "再登记；偷改的先撤销（git checkout -- <文件> / 删掉新建文件），并在 JOURNAL 记一行。")
+    ents = changed_entries(root)
+    if ents is None:
         return reject("git status 读不出来。")
+    if kind == "green":
+        # 判卷不能在动过手脚的考题或判卷员上进行：verify.sh 跑的是工作区，考题/围栏脚本
+        # 有未存档改动，绿了也不算数——收进去就是替偷改洗白，检测门再拦也只剩事后追责。
+        held = [p for _, p in ents if fence_held(p, phase)]
+        if held:
+            return reject("受保护文件有未存档改动（围栏脚本任何时候、考题/规格/规矩在实现期都不代收）："
+                          + ", ".join(held[:6]) + (f" 等 {len(held)} 项" if len(held) > 6 else "")
+                          + "。判卷不能在动过手脚的考题或判卷员上进行，这一档不代存。"
+                          "先撤销（git checkout -- <文件> / 删掉新建文件）再重新登记；"
+                          "若是用户升级了围栏，请用户在沙箱外先 commit。")
+    # 按档种挑落点：red 只收考题和台账，note 不收考题，仓库根上的新文件谁都不收，
+    # 围栏脚本谁都不收，实现期的受保护文件 note 不收——不该进的不再整档拒绝，而是留在
+    # 工作区、在回执里点名（模型在沙箱里本来就动不了 .git，拒绝只会让它反复登记；
+    # 而考题的唯一入口仍是 test-writing 相位的红存档，先红后绿没有松动）。
+    take, skip = stage_plan(kind, ents, phase)
     # 登记动作本身就会写 state.json，所以它出现在改动清单里什么都不证明——
     # 把它剔掉再看还剩什么，才是「这次存档到底有没有实体」。空存档是假完成信号。
-    if not [f for f in files if f != ".loopwork/state.json"]:
-        return reject("除了状态文件没有任何改动，这次存档会是个空档——空存档不算数。")
-    hits = secret_hits(root, files)
+    if not [f for f in take if f != ".loopwork/state.json"]:
+        return reject("除了状态文件没有任何改动，这次存档会是个空档——空存档不算数。"
+                      + skipped_note(kind, skip, phase))
+    hits = secret_hits(root, take)     # 只筛要入档的：留在工作区的东西进不了历史
     if hits:
         return reject("疑似密钥要进这次存档：" + "；".join(hits[:3]) +
                       "。密钥入库是最难撤销的事故：先把它移出仓库或写进 .gitignore，再来存档。")
     warn = ""   # 判卷预警：只有绿存档跑 verify.sh，也只有那一路可能带回痕迹
-    if kind == "red":
-        bad = guard_rules.impl_files(files)
-        if bad:
-            return reject("红存档里只该有考题，但还改了：" + ", ".join(bad[:5]) +
-                          "。先红后绿——实现代码留到绿存档，现在把它们撤回或另存。")
-    elif kind == "note":
-        # 记事存档是给阶段切换/登记/批末落盘用的杂项档。唯独考题不许从这里进：
-        # 考题的唯一入口是红存档，红存档才发绿存档的入场券——这条口子一开，先红后绿就绕开了。
-        bad = [f for f in files if f.startswith("tests/")]
-        if bad:
-            return reject("记事存档里夹带了考题：" + ", ".join(bad[:5]) +
-                          "。考题只能走红存档（progress.py commit red）——记事存档不发红票，"
-                          "从这里进的考题等于绕开先红后绿。")
-    else:
+    if kind == "green":
         if not st.get("red_commit_pending"):
             return reject("上一次绿存档之后没有过红存档。考题先红后绿：先写会失败的考题、"
                           "存一次红档，再来存绿档。")
@@ -237,9 +309,11 @@ def archive_pending(root, st):
             return reject(f"verify.sh 不是 exit 0（实际 {code}）——考题没全绿就不是绿存档。"
                           "看 .loopwork/logs/verify-*.log 最后 20 行。")
         warn = trip_note(vout)
-    code, out = sh(["git", "add", "-A"], root, timeout=60)
-    if code != 0:
-        return reject("git add -A 失败：" + out[-160:])
+    for i in range(0, len(take), 200):    # 点名暂存（--literal-pathspecs：路径里的 * ? [ 不当通配），分批免得命令行过长
+        code, out = sh(["git", "--literal-pathspecs", "add", "-A", "--"] + take[i:i + 200],
+                       root, timeout=60)
+        if code != 0:
+            return reject("git add 失败：" + out[-160:])
     code, out = sh(["git", "commit", "-m", msg], root, timeout=60)
     if code != 0:
         return reject("git commit 失败：" + out[-160:])
@@ -248,15 +322,16 @@ def archive_pending(root, st):
     st.pop("pending_commit", None)
     if kind == "red":
         st["red_commit_pending"] = True     # 这张票是绿存档的入场券（先红后绿）
-        note = f"[代存档] 红存档已落 {head[:10]}：{msg}。基线已推进，可以开始写实现了。"
+        note = (f"[代存档] 红存档已落 {head[:10]}：{msg}。基线已推进，可以开始写实现了。"
+                + skipped_note(kind, skip, phase))
     elif kind == "note":
         # 记事存档不动轮数、不发也不吃红票——它不是一轮 TDD，只是把台账落进历史。
-        note = f"[代存档] 记事存档已落 {head[:10]}：{msg}。基线已推进。"
+        note = f"[代存档] 记事存档已落 {head[:10]}：{msg}。基线已推进。" + skipped_note(kind, skip, phase)
     else:
         st["red_commit_pending"] = False
         st["round_count"] = int(st.get("round_count", 0) or 0) + 1
         note = (f"[代存档] 绿存档已落 {head[:10]}：{msg}。verify.sh 全绿，"
-                f"基线已推进，本圈第 {st['round_count']} 轮。") + warn
+                f"基线已推进，本圈第 {st['round_count']} 轮。") + warn + skipped_note(kind, skip, phase)
         try:
             with open(os.path.join(root, "JOURNAL.md"), "a", encoding="utf-8") as jf:
                 jf.write(f"- [存档] {head[:10]} {msg}\n")
@@ -354,7 +429,9 @@ def main():
             payload = json.load(sys.stdin)
         except Exception:
             pass
-        root = os.environ.get("CODEX_PROJECT_DIR") or payload.get("cwd") or os.getcwd()
+        start = payload.get("cwd") or os.getcwd()
+        root = (guard_log.find_root(start, script=__file__, env_keys=()) if guard_log is not None
+                else start)
         state_p = os.path.join(root, ".loopwork", "state.json")
         if not os.path.exists(state_p):
             return 0
@@ -364,6 +441,10 @@ def main():
         # 本轮取证：账本比上轮末多出几行，就是模型这一轮撞了几次墙。水位线在这里
         # 一次推进并落盘——不能让「记没记账」取决于后面走哪个分支。
         hits = round_hits(root, st)
+        # 活体核对：本会话有没有收到过 PostToolUse 心跳。没有 = 接线在、平台没在跑围栏
+        # （最常见是信任门没过 / 会话开在子目录）。只挂在顶回文案尾，不单独顶回。
+        beat_note = (guard_log.no_beat_note(root, payload.get("session_id", ""))
+                     if guard_log is not None else "")
 
         # 上一轮已优雅停机 → 本轮无条件放行一次，让会话真的能停下来交还给用户
         try:
@@ -426,7 +507,7 @@ def main():
         def emit(msg):
             """本轮只顶回一次：代存档结果与检测门/挂机档要说的话合并成同一条，
             话尾挂上本轮取证——连撞同一面墙是「在找绕路」的信号，模型自己也该看见。"""
-            return block((f"{arch_note}\n{msg}" if arch_note else msg) + hits_note(hits))
+            return block((f"{arch_note}\n{msg}" if arch_note else msg) + hits_note(hits) + beat_note)
 
         def quiet():
             """没有要顶回的事。但刚落了存档就得顶回一次，把 hash 交到模型手里。"""

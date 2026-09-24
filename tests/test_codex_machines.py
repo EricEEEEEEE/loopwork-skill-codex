@@ -5,7 +5,7 @@
 stop_hook（检测门：基线锚定/相位纪律；挂机档：批次外部计数/受阻出口/防打转）、
 audit_log、progress 对账、verify fail-closed。exit 0 = 全绿。
 """
-import json, os, shutil, subprocess, sys, tempfile
+import json, os, shutil, subprocess, sys, tempfile, time
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 INIT = os.path.join(REPO, "skills", "loopwork", "scripts", "init_project.sh")
@@ -22,21 +22,49 @@ def run(args, cwd, env=None, inp=None):
 def main():
     S = tempfile.mkdtemp(prefix="lwc-test-")
     try:
-        # 剥掉外部 CLAUDE_PROJECT_DIR：它在 root() 里优先级更高，泄漏进来会把机器指向别的项目
+        # 剥掉外部 CLAUDE_PROJECT_DIR：泄漏进来会把仓库副本（非 .loopwork/hooks/ 落点）指向别的项目。
+        # 不再伪造 CODEX_PROJECT_DIR——Codex 没有这个变量，机器只能靠自身落点 / 向上爬找根。
         env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"}
-        env["CODEX_PROJECT_DIR"] = S
         H = os.path.join(S, ".loopwork", "hooks")
 
         r = run(["bash", INIT, S, "沙盒项目"], S, env)
         check("A1 init 建家成功", r.returncode == 0, r.stderr[-200:])
         for f in ("guard_rules.py", "guard_log.py", "guard_pre.py", "stop_hook.py",
-                  "audit_log.py", "progress.py", "verify.sh"):
+                  "audit_log.py", "progress.py", "interrupt_log.py", "verify.sh", "selftest.sh"):
             check(f"A2 机器进驻 {f}", os.path.exists(os.path.join(H, f)))
+        SK = os.path.join(REPO, "skills", "loopwork", "scripts")
+        def _compiles(fp):
+            try:
+                compile(open(fp, encoding="utf-8").read(), fp, "exec")
+                return True
+            except SyntaxError:
+                return False
+        pys = sorted(f for f in os.listdir(SK) if f.endswith(".py"))
+        check("A2b 技能库全部 .py 在本机 python3 下可编译（3.9 兼容线）",
+              bool(pys) and all(_compiles(os.path.join(SK, f)) for f in pys), str(pys))
+        check("A2c selftest 记 hooks.json 指纹（信任门提醒）",
+              "hooks.json.md5" in open(os.path.join(SK, "selftest.sh"), encoding="utf-8").read())
+        check("A2d 建家 .gitignore 含 .loopwork/scratch/（stage-4 留底目录不入档）",
+              ".loopwork/scratch/" in open(os.path.join(S, ".gitignore"), encoding="utf-8").read())
+        check("A1b 首跑 init 提醒重新信任钩子（hooks.json 指纹变了）",
+              "⚠️ .codex/hooks.json 有变动" in r.stdout, r.stdout[-200:])
         check("A3 Codex 钩子接线", os.path.exists(os.path.join(S, ".codex", "hooks.json")))
         hooks = json.load(open(os.path.join(S, ".codex", "hooks.json"), encoding="utf-8"))
-        check("A4 四个事件均已挂载",
+        check("A4 五个事件均已挂载（含 Interrupt）",
               all(k in hooks.get("hooks", {})
-                  for k in ("PreToolUse", "SessionStart", "Stop", "PostToolUse")))
+                  for k in ("PreToolUse", "SessionStart", "Stop", "PostToolUse", "Interrupt")))
+        def hk(ev):
+            for e in hooks["hooks"].get(ev, []):
+                for h in e.get("hooks", []):
+                    if ".loopwork/hooks/" in h.get("command", ""):
+                        return h
+            return {}
+        check("A4b hooks.json 字段：Stop timeout 400 + statusMessage、PreToolUse timeout 20 + statusMessage、"
+              "Interrupt ≤3s、顶层 description",
+              hk("Stop").get("timeout") == 400 and bool(hk("Stop").get("statusMessage"))
+              and hk("PreToolUse").get("timeout") == 20 and bool(hk("PreToolUse").get("statusMessage"))
+              and 0 < hk("Interrupt").get("timeout", 99) <= 3 and bool(hooks.get("description")),
+              json.dumps({k: hk(k) for k in ("Stop", "PreToolUse", "Interrupt")}, ensure_ascii=False)[:200])
         rules = open(os.path.join(S, ".codex", "rules", "loopwork.rules"), encoding="utf-8").read()
         check("A5 规则含 forbidden 危险命令", 'decision="forbidden"' in rules and '"--force"' in rules)
         check("A5b 规则含 sudo 前缀与长旗标变体", '"sudo"' in rules and '"--recursive"' in rules)
@@ -44,8 +72,14 @@ def main():
               all(f'"{k}"' in rules for k in ("--amend", "rebase", "filter-branch",
                                               "update-ref", "stash", "clean"))
               and '"sudo", "git", "rebase"' in rules)
-        check("A6 只读判卷员注册", 'sandbox_mode = "read-only"' in
-              open(os.path.join(S, ".codex", "agents", "loopwork-reviewer.toml"), encoding="utf-8").read())
+        rvt = open(os.path.join(S, ".codex", "agents", "loopwork-reviewer.toml"), encoding="utf-8").read()
+        check("A6 只读判卷员注册", 'sandbox_mode = "read-only"' in rvt)
+        check("A6g 判卷员 TOML 自带任务指令（developer_instructions：只看不改 + 四段 + 指向 reviewer.md）",
+              'developer_instructions = """' in rvt and "只看不改" in rvt
+              and "references/reviewer.md" in rvt
+              and all(k in rvt for k in ("第一段 · 合规", "第二段 · 质量", "第三段 · 作弊清单", "第四段 · 考题盲区")))
+        check("A6h 判卷员 TOML 多行串闭合、无反斜杠（3.9 没有 tomllib，做最小语法自检）",
+              rvt.count('"""') == 2 and "\\" not in rvt)
         # 判卷员的任务指令不许悄悄消失或缩水（与 CC 版同一份职责，锁住）
         rv_p = os.path.join(REPO, "skills", "loopwork", "references", "reviewer.md")
         check("A6b 判卷员任务指令在", os.path.exists(rv_p))
@@ -67,10 +101,19 @@ def main():
               all(k in s0 for k in (".codex/hooks.json", "AgentBaiting", "只转述",
                                     "装什么由用户指定", "不再询问")))
         check("A7 AGENTS.md 锚点", "Loopwork" in open(os.path.join(S, "AGENTS.md"), encoding="utf-8").read())
+        # 老版判卷员 TOML（3 行、无任务指令）→ 重跑 init 要原地升级，不是跳过
+        with open(os.path.join(S, ".codex", "agents", "loopwork-reviewer.toml"), "w", encoding="utf-8") as f:
+            f.write('name = "loopwork-reviewer"\ndescription = "old"\nsandbox_mode = "read-only"\n')
         r2 = run(["bash", INIT, S, "沙盒项目"], S, env)
         check("A8 init 幂等", r2.returncode == 0)
         hooks2 = json.load(open(os.path.join(S, ".codex", "hooks.json"), encoding="utf-8"))
         check("A9 重复 init 不重复接线", len(hooks2["hooks"]["Stop"]) == 1)
+        check("A9d 重跑 init（hooks.json 没变）不再提醒重新信任", "⚠️ .codex/hooks.json" not in r2.stdout, r2.stdout[-200:])
+        rvt2 = open(os.path.join(S, ".codex", "agents", "loopwork-reviewer.toml"), encoding="utf-8").read()
+        check("A9b 老版判卷员 TOML 重跑 init 后原地升级（补上 developer_instructions）",
+              'developer_instructions = """' in rvt2 and "已注册/升级" in r2.stdout, r2.stdout[-160:])
+        r3 = run(["bash", INIT, S, "沙盒项目"], S, env)
+        check("A9c 已升级的判卷员 TOML 再跑 init 不再重写", "只读判卷员" not in r3.stdout, r3.stdout[-160:])
         SELFTEST = os.path.join(REPO, "skills", "loopwork", "scripts", "selftest.sh")
         check("A10 selftest 语法完好", run(["bash", "-n", SELFTEST], S, env).returncode == 0)
         # A11 规则文件升级：旧版缺 sudo/长旗标条目 → 追加一次、幂等、用户自定义规则不动
@@ -169,13 +212,59 @@ def main():
         check("P12 实现期跑考题放行（提到路径不算写）", rc == 0)
         rc, err = gpre("Bash", "apply_patch <<'EOF'\n" + patch("*** Update File: tests/exam.py") + "EOF")
         check("P13 heredoc 走 shell 的补丁一样被拦", rc == 2 and "实现阶段" in err, err[-160:])
+        # ---- 强推 / 全开权限：共享库 guard_rules 的两处补洞，Codex 适配层照样接得住 ----
+        F = "--for" + "ce"; SF = "-" + "f"     # 拼接写法，避免上游安全钩子误拦本测试文件
+        def sban(name, cmd, want):
+            rc, err = gpre("Bash", cmd)
+            check(name, rc == want, err[-160:])
+        sban("S1 git -C . push " + F + " 被拦（全局选项绕不过）", "git -C . push " + F + " origin dev", 2)
+        sban("S2 git --no-pager push " + SF + " 被拦", "git --no-pager push " + SF + " origin dev", 2)
+        sban("S3 git -c k=v push " + F + "-with-lease 被拦", "git -c core.x=1 push " + F + "-with-lease origin dev", 2)
+        sban("S4 push -uf 合写短旗标被拦", "git push -uf origin dev", 2)
+        sban("S5 push origin dev 放行", "git push origin dev", 0)
+        sban("S6 提交信息里的 force push 不误伤", 'git commit -m "force push later"', 0)
+        sban("S7 chmod -R 777 被拦", "chmod -R 777 build/", 2)
+        sban("S8 chmod 0777 被拦", "chmod 0777 run.sh", 2)
+        sban("S9 chmod a+rwx 被拦", "chmod a+rwx run.sh", 2)
+        sban("S10 chmod -R ugo+rwx 被拦", "chmod -R ugo+rwx build/", 2)
+        sban("S11 chmod u+x 放行", "chmod u+x run.sh", 0)
+        sban("S12 chmod -R a+rwX 放行（大写 X 不给普通文件加执行位）", "chmod -R a+rwX build/", 0)
+        sban("S13 chmod 755 放行", "chmod 755 run.sh", 0)
+        # ---- X 系列：实现期 tests 基础设施白名单（conftest / _infra / fixtures 放行 + allowed.jsonl 留痕）----
+        ALW = os.path.join(S, ".loopwork", "logs", "allowed.jsonl")
+        arows = lambda: ([json.loads(x) for x in open(ALW, encoding="utf-8").read().splitlines() if x.strip()]
+                         if os.path.exists(ALW) else [])
+        rc, err = gpre("apply_patch", patch("*** Update File: tests/conftest.py"), "implementing")
+        check("X1 实现期改 tests/conftest.py 放行", rc == 0, err[-160:])
+        check("X1b 放行留痕：allowed.jsonl 一行 rule=tests-infra",
+              len(arows()) == 1 and arows()[0].get("rule") == "tests-infra"
+              and arows()[0].get("target") == "tests/conftest.py", str(arows())[:200])
+        rc, err = gpre("apply_patch", patch("*** Add File: tests/_infra/helper.py"), "implementing")
+        check("X2 实现期新增 tests/_infra/helper.py 放行", rc == 0, err[-160:])
+        rc, err = gpre("apply_patch", patch("*** Update File: tests/fixtures/test_x.py"), "implementing")
+        check("X3 白名单目录里 test_ 开头的仍按考题锁", rc == 2 and "实现阶段" in err, err[-160:])
+        rc, err = gpre("Bash", "echo x > tests/conftest.py", "implementing")
+        check("X4 shell 重定向到 tests/conftest.py 放行", rc == 0, err[-160:])
+        rc, err = gpre("Bash", "echo x > tests/test_a.py", "implementing")
+        check("X5 shell 重定向到考题仍被拦", rc == 2, err[-160:])
+        check("X6 三次放行三行留痕，工具名对得上",
+              [r.get("tool") for r in arows()] == ["apply_patch", "apply_patch", "Bash"], str(arows())[:200])
+        rc, err = gpre("Bash", "cp x.py tests/fixtures/", "implementing")
+        check("X7 cp 到白名单目录本身仍拦（落点文件名未知，可能就是考题）", rc == 2, err[-160:])
+        rc, err = gpre("Bash", "cp x.py tests/fixtures/x.py", "implementing")
+        check("X8 cp 到白名单目录里的具体文件放行", rc == 0, err[-160:])
         rc, _ = gpre("web_search", "", ti={"query": "loopwork"})
         check("P15 没见过的工具放行", rc == 0)
         recs = [json.loads(x) for x in open(BLK, encoding="utf-8").read().splitlines() if x.strip()]
-        check("P16 取证账本一次拦截一行（10 次拦截 + 1 次未知工具）",
-              len(recs) == 11 and recs[0].get("rule") == "impl-locked"
-              and recs[-1].get("rule") == "unknown-tool"
-              and recs[-1].get("target") == "keys=query", f"{len(recs)} 条 / {str(recs[-1])[:100]}")
+        check("P16 取证账本一次拦截一行（21 次拦截；放行的未知工具和白名单放行都不进来）",
+              len(recs) == 21 and recs[0].get("rule") == "impl-locked"
+              and not any(r.get("rule") == "unknown-tool" for r in recs), f"{len(recs)} 条 / {str(recs[-1])[:100]}")
+        SEEN = os.path.join(S, ".loopwork", "logs", "tools_seen.jsonl")
+        seen = ([json.loads(x) for x in open(SEEN, encoding="utf-8").read().splitlines() if x.strip()]
+                if os.path.exists(SEEN) else [])
+        check("P16b 未知工具另记 tools_seen.jsonl（1 条：web_search / keys=query，字段 ts/tool/target/phase）",
+              len(seen) == 1 and seen[0].get("tool") == "web_search" and seen[0].get("target") == "keys=query"
+              and set(seen[0]) == {"ts", "tool", "target", "phase"}, str(seen)[:160])
         check("P17 账本字段齐（ts/tool/target/rule/phase）",
               all(set(r) == {"ts", "tool", "target", "rule", "phase"} for r in recs))
         rc, _ = gpre("Bash", "cat .loopwork/state.json")
@@ -187,6 +276,37 @@ def main():
               rc == 0 and "guard_rules.py" in err, err[-160:])
         os.replace(gr + ".bak", gr)
         os.remove(BLK)
+
+        # ---- 根解析：会话开在子目录 / Codex 把钩子 cwd 设成当前轮次目录，围栏照样找到家 ----
+        sub = os.path.join(S, "sub")
+        os.makedirs(sub, exist_ok=True)      # 空目录 git 不跟踪，不影响后面的存档对账
+        setp("phase", "implementing")
+        def subrun(script, payload, cwd=sub):
+            return run(["python3", script], cwd, env, inp=json.dumps(payload))
+        pj = lambda body, cwd=sub: {"tool_name": "apply_patch", "cwd": cwd, "tool_input": {"command": body}}
+        p = subrun(os.path.join(H, "guard_pre.py"), pj(patch("*** Update File: ../tests/exam.py")))
+        check("Q1 子目录里补丁改上级考题：装在 .loopwork/hooks/ 的围栏靠自身落点找到根",
+              p.returncode == 2 and "实现阶段" in p.stderr, p.stderr[-160:])
+        REPO_GP = os.path.join(REPO, "skills", "loopwork", "scripts", "guard_pre.py")
+        p = subrun(REPO_GP, pj(patch("*** Update File: ../tests/exam.py")))
+        check("Q2 不在 .loopwork/hooks/ 里的副本靠向上爬找到根（state.json 在上一级）",
+              p.returncode == 2 and "实现阶段" in p.stderr, p.stderr[-160:])
+        outside = tempfile.mkdtemp(prefix="lwc-out-")
+        try:
+            p = subrun(REPO_GP, pj(patch(f"*** Update File: {os.path.join(S, 'tests', 'exam.py')}"), outside),
+                       cwd=outside)
+            check("Q3 项目外目录爬不到 state.json → 不是 loopwork 项目，放行", p.returncode == 0, p.stderr[-160:])
+        finally:
+            shutil.rmtree(outside, ignore_errors=True)
+        p = subrun(os.path.join(H, "guard_pre.py"),
+                   {"tool_name": "Bash", "cwd": sub, "tool_input": {"command": "rm " + "-rf /x"}})
+        check("Q4 子目录里的危险删除照样被拦", p.returncode == 2, p.stderr[-160:])
+        audit_q = os.path.join(S, ".loopwork", "logs", "audit.jsonl")
+        n0 = len(open(audit_q, encoding="utf-8").read().splitlines()) if os.path.exists(audit_q) else 0
+        subrun(os.path.join(H, "audit_log.py"), {"tool_name": "Bash", "cwd": sub, "tool_input": {"command": "ls"}})
+        check("Q5 子目录里的工具调用记进项目根的审计账本（不是 sub/.loopwork）",
+              len(open(audit_q, encoding="utf-8").read().splitlines()) == n0 + 1
+              and not os.path.exists(os.path.join(sub, ".loopwork")))
         setp("phase", "test-writing")
 
         # ---- 检测门 ----
@@ -226,6 +346,19 @@ def main():
         code, d = stop_hook()
         check("B7 实现期未存档改考题要求撤销", d.get("decision") == "block" and "撤销" in d.get("reason", ""))
         git("checkout", "--", "tests/exam.py")
+        # —— tests/ 基础设施白名单（conftest / _infra / fixtures）实现期本就放行，检测门不能再顶回 ——
+        with open(os.path.join(S, "tests", "conftest.py"), "w") as f:
+            f.write("# infra\n")
+        code, d = stop_hook()
+        check("B7b 实现期未存档的 tests/conftest.py（白名单）检测门放行", code == 0 and not d, str(d)[:160])
+        os.makedirs(os.path.join(S, "tests", "fixtures"), exist_ok=True)
+        with open(os.path.join(S, "tests", "fixtures", "test_x.py"), "w") as f:
+            f.write("tampered\n")
+        code, d = stop_hook()
+        check("B7c 白名单目录里 test_ 开头的仍按考题拦",
+              d.get("decision") == "block" and "tests/fixtures/test_x.py" in d.get("reason", ""), str(d)[:160])
+        os.remove(os.path.join(S, "tests", "conftest.py"))
+        os.remove(os.path.join(S, "tests", "fixtures", "test_x.py")); os.rmdir(os.path.join(S, "tests", "fixtures"))
         # —— 围栏保护自己：动 .loopwork/hooks/ 也是动受保护文件 ——
         gp = os.path.join(S, ".loopwork", "hooks", "stop_hook.py")
         with open(gp, "a") as f:
@@ -345,6 +478,10 @@ def main():
             f.write("- [x] T01\n- [x] T02\n")
         code, d = stop_hook()
         check("C6 批空放行+摘 flag", not d and not os.path.exists(flag))
+        open(flag, "w").close()
+        p = run(["python3", os.path.join(H, "stop_hook.py")], sub, env, inp=json.dumps({"cwd": sub}))
+        check("Q6 子目录里轮末钩子照样找到 state 与 flag（批空放行+摘 flag）",
+              p.returncode == 0 and not p.stdout.strip() and not os.path.exists(flag), p.stdout[-160:])
         # —— 顶回总数上限：Codex 平台不给顶回设硬上限，这道刹车只能围栏自己踩 ——
         with open(os.path.join(S, "tasks.md"), "w", encoding="utf-8") as f:
             f.write("- [ ] T01 a\n- [ ] T02 b\n")
@@ -372,6 +509,15 @@ def main():
         check("R1 审计日志超 5MB 单代轮转",
               p.returncode == 0 and os.path.exists(audit + ".1")
               and os.path.getsize(audit) < 1000 and '"ls"' in open(audit, encoding="utf-8").read())
+        # ---- U1 钩子活体心跳：PostToolUse 每次覆写 hook_heartbeat.json ----
+        HB = os.path.join(S, ".loopwork", "logs", "hook_heartbeat.json")
+        p = run(["python3", os.path.join(H, "audit_log.py")], S, env,
+                inp=json.dumps({"hook_event_name": "PostToolUse", "session_id": "sess-A",
+                                "tool_name": "Bash", "tool_input": {"command": "ls"}, "cwd": S}))
+        hb = json.load(open(HB, encoding="utf-8")) if os.path.exists(HB) else {}
+        check("U1a PostToolUse 落钩子活体心跳（event/session_id/tool/time）",
+              p.returncode == 0 and hb.get("event") == "PostToolUse" and hb.get("session_id") == "sess-A"
+              and hb.get("tool") == "Bash" and len(hb.get("time", "")) >= 19, str(hb)[:160])
         with open(os.path.join(S, "tasks.md"), "w", encoding="utf-8") as f:
             f.write("- [x] T01 a\n- [x] T02 b\n- [ ] T03 c\n")
         p = run(["python3", os.path.join(H, "progress.py"), "card"], S, env)
@@ -380,10 +526,68 @@ def main():
         run(["git", "commit", "-qm", "存档: T02 假完成", "--allow-empty"], S, env)
         p = run(["python3", os.path.join(H, "progress.py"), "card"], S, env)
         check("D2b 空存档假完成被点破", "空提交" in p.stdout)
+        check("U1b 进度卡显示上次钩子活体", "上次钩子活体：" in p.stdout and "PostToolUse · Bash" in p.stdout)
         setp("phase", "implementing")
         run(["python3", os.path.join(H, "progress.py"), "bump-cycle"], S, env)
         st = json.load(open(os.path.join(S, ".loopwork", "state.json"), encoding="utf-8"))
         check("D3 bump-cycle 复位 phase", st.get("phase") == "test-writing")
+
+        # ---- U1c–f 轮末活体核对：本会话没有 PostToolUse 心跳 → 顶回文案尾加一句 ----
+        def stop_sid(sid):
+            p = run(["python3", os.path.join(H, "stop_hook.py")], S, env,
+                    inp=json.dumps({"cwd": S, "session_id": sid}))
+            try:
+                d = json.loads(p.stdout) if p.stdout.strip() else {}
+            except Exception:
+                d = {}
+            return p.returncode, d
+        run(["python3", os.path.join(H, "audit_log.py")], S, env,      # 心跳归 sess-A（独立前置，不赌上文）
+            inp=json.dumps({"hook_event_name": "PostToolUse", "session_id": "sess-A",
+                            "tool_name": "Bash", "tool_input": {"command": "ls"}, "cwd": S}))
+        with open(os.path.join(S, "tasks.md"), "w", encoding="utf-8") as f:
+            f.write("- [ ] T03 c\n- [ ] T04 d\n")
+        setp("round_count", 0); setp("batch_size", 2)
+        open(flag, "w").close()                       # 每次都开新批：不让无进展计数把批停掉
+        code, d = stop_sid("sess-B")
+        check("U1c 另一会话的 Stop：没有本会话心跳 → 提示先跑 selftest / 检查信任门",
+              d.get("decision") == "block" and "没有调用过它" in d.get("reason", ""), d.get("reason", "")[-200:])
+        open(flag, "w").close()
+        code, d = stop_sid("sess-A")
+        check("U1d 同会话有心跳 → 不提示",
+              d.get("decision") == "block" and "没有调用过它" not in d.get("reason", ""), d.get("reason", "")[-200:])
+        open(flag, "w").close()
+        code, d = stop_hook()
+        check("U1e Stop 没带 session_id → 不下判断（fail-quiet）",
+              d.get("decision") == "block" and "没有调用过它" not in d.get("reason", ""), d.get("reason", "")[-200:])
+        os.replace(HB, HB + ".bak")
+        open(flag, "w").close()
+        code, d = stop_sid("sess-A")
+        check("U1f 心跳文件不存在 → 提示",
+              d.get("decision") == "block" and "没有调用过它" in d.get("reason", ""), d.get("reason", "")[-200:])
+        os.replace(HB + ".bak", HB)
+        # ---- U3 Interrupt 钩子：只记录、不打印、不摘 flag、要快 ----
+        IL = os.path.join(S, ".loopwork", "logs", "interrupts.jsonl")
+        open(flag, "w").close()
+        t0 = time.perf_counter()
+        p = run(["python3", os.path.join(H, "interrupt_log.py")], S, env,
+                inp=json.dumps({"hook_event_name": "Interrupt", "session_id": "sess-A", "cwd": S}))
+        dt = time.perf_counter() - t0
+        recs_i = ([json.loads(x) for x in open(IL, encoding="utf-8").read().splitlines() if x.strip()]
+                  if os.path.exists(IL) else [])
+        check("U3a Interrupt 只记一行（session_id/ts）、无输出、rc=0",
+              p.returncode == 0 and p.stdout == "" and len(recs_i) == 1
+              and recs_i[0].get("session_id") == "sess-A" and len(recs_i[0].get("ts", "")) >= 19,
+              (p.stdout + p.stderr)[-160:])
+        check("U3b Interrupt 不摘 batch.flag（误触 Ctrl-C 不该悄悄结束一批）", os.path.exists(flag))
+        os.remove(flag)
+        p = run(["python3", os.path.join(H, "progress.py"), "card"], S, env)
+        check("U3c 进度卡显示上次人为中断", "上次人为中断：" in p.stdout)
+        check(f"U3d Interrupt 钩子耗时 {dt:.3f}s < 1s（平台缺省 1s、上限 3s）", dt < 1.0)
+        # ---- U6 压缩后重注入：SessionStart(source=compact) 的 payload 喂进进度卡，仍是纯文本卡片 ----
+        p = run(["python3", os.path.join(H, "progress.py"), "card"], S, env,
+                inp=json.dumps({"hook_event_name": "SessionStart", "source": "compact", "cwd": S, "session_id": "sess-A"}))
+        check("U6 SessionStart(source=compact) 进度卡纯文本重注入",
+              p.returncode == 0 and "[Loopwork 进度卡]" in p.stdout and not p.stdout.lstrip().startswith("{"))
 
         # ---- 钩子代存档（pending_commit）----
         # 模型在沙箱里写不动 .git：它只登记意图，钩子（沙箱外）验完再落。
@@ -402,6 +606,9 @@ def main():
         def exam(body="def test_x():\n    assert False\n"):
             with open(os.path.join(S, "tests", "exam_red.py"), "w", encoding="utf-8") as f:
                 f.write(body)
+
+        lsfiles = lambda: git("ls-files").stdout
+        porcelain = lambda: git("status", "--porcelain").stdout
 
         with open(os.path.join(S, "tests", "run.sh"), "w", encoding="utf-8") as f:
             f.write("exit 0\n")
@@ -426,11 +633,15 @@ def main():
         with open(os.path.join(S, "src", "app.py"), "w", encoding="utf-8") as f:
             f.write("x = 1\n")
         code, d = stop_hook()
-        check("G5 红存档混进实现文件被拒，登记清空",
-              d.get("decision") == "block" and "只该有考题" in d.get("reason", "")
-              and "src/app.py" in d.get("reason", "")
-              and head() == h0 and "pending_commit" not in stjson(), str(d)[:200])
+        h0b, reason = head(), d.get("reason", "")
+        check("G5 红存档只收考题和台账：实现文件留在工作区、回执点名，红档照落",
+              d.get("decision") == "block" and "红存档已落" in reason
+              and "未入档" in reason and "src/app.py" in reason and h0b != h0
+              and "src/app.py" not in lsfiles() and "tests/exam_red.py" in lsfiles()
+              and "pending_commit" not in stjson(), str(d)[:300])
         os.remove(os.path.join(S, "src", "app.py"))
+        h0 = h0b
+        setp("red_commit_pending", "0")   # 把 G5 发的红票收回：G7 要看的是「没红票的绿存档」
         exam("KEY = '" + "sk-" + "A1b2C3d4" * 3 + "'\n")   # 假密钥拼出来：不把像密钥的字面量留在仓库里
         pcommit("red", "存档: T9 红考题")
         code, d = stop_hook()
@@ -438,11 +649,14 @@ def main():
               d.get("decision") == "block" and "疑似密钥" in d.get("reason", "")
               and head() == h0 and "pending_commit" not in stjson(), str(d)[:200])
         exam()
+        with open(os.path.join(S, "src", "app.py"), "w", encoding="utf-8") as f:
+            f.write("x = 1\n")   # 绿存档得有实现物，不然先撞「空档」而不是「没红票」
         pcommit("green", "存档: T9 绿实现")
         code, d = stop_hook()
         check("G7 手里没有红存档票的绿存档被拒（先红后绿）",
               d.get("decision") == "block" and "没有过红存档" in d.get("reason", "")
               and head() == h0 and "pending_commit" not in stjson(), str(d)[:200])
+        exam("def test_x():\n    assert False\n\ndef test_x2():\n    assert False\n")
         pcommit("red", "存档: T9 红考题")
         code, d = stop_hook()
         h1, st_a = head(), stjson()
@@ -451,6 +665,9 @@ def main():
               and h1[:10] in d.get("reason", "") and h1 != h0
               and st_a.get("last_round_commit") == h1 and st_a.get("red_commit_pending") is True
               and "pending_commit" not in st_a, str(d)[:200])
+        check("G8b 红存档不收实现文件：src/app.py 留在工作区并在回执里点名",
+              "未入档" in d.get("reason", "") and "src/app.py" in d.get("reason", "")
+              and "src/app.py" not in lsfiles(), str(d)[:300])
         with open(os.path.join(S, "src", "app.py"), "w", encoding="utf-8") as f:
             f.write("x = 1\n")   # 绿存档带的是实现——这次它就该跟着一起入库
         with open(os.path.join(S, "tests", "run.sh"), "w", encoding="utf-8") as f:
@@ -509,23 +726,20 @@ def main():
         with open(os.path.join(S, "spec.md"), "w", encoding="utf-8") as f:
             f.write("# 规格\n- 新增一条验收句\n")
         exam("def test_w():\n    assert False\n")
-        pcommit("note", "存档: 阶段切换")
-        code, d = stop_hook()
-        check("G14 记事存档夹带考题被拒（考题只能走红存档）",
-              d.get("decision") == "block" and "夹带了考题" in d.get("reason", "")
-              and "tests/exam_red.py" in d.get("reason", "")
-              and head() == h4 and "pending_commit" not in stjson(), str(d)[:200])
-        git("checkout", "--", "tests/exam_red.py")   # 考题撤回，只留 spec.md 这条台账改动
         rounds_before = int(stjson().get("round_count", 0))
         pcommit("note", "存档: 阶段切换")
         code, d = stop_hook()
-        h5, st_c = head(), stjson()
+        h5, st_c, reason = head(), stjson(), d.get("reason", "")
+        check("G14 记事存档不收考题：考题留在工作区、回执点名，台账照落（考题只能走红存档）",
+              d.get("decision") == "block" and "记事存档已落" in reason
+              and "未入档" in reason and "tests/exam_red.py" in reason and h5 != h4
+              and " M tests/exam_red.py" in porcelain() and "spec.md" in lsfiles()
+              and "pending_commit" not in stjson(), str(d)[:300])
         check("G15 记事存档落地：基线前进，但不动轮数、不发红票",
-              d.get("decision") == "block" and "记事存档已落" in d.get("reason", "")
-              and h5[:10] in d.get("reason", "") and h5 != h4
-              and st_c.get("last_round_commit") == h5
+              h5[:10] in reason and st_c.get("last_round_commit") == h5
               and int(st_c.get("round_count", 0)) == rounds_before
               and not st_c.get("red_commit_pending"), str(d)[:200])
+        git("checkout", "--", "tests/exam_red.py")   # 考题撤回：它没进记事档，还留在工作区
         with open(os.path.join(S, "spec.md"), "a", encoding="utf-8") as f:
             f.write("- 再来一条\n")
         pcommit("green", "存档: 想蒙混过关")
@@ -535,6 +749,132 @@ def main():
               and head() == h5, str(d)[:200])
         git("add", "-A"); git("commit", "-qm", "收尾 4")
         setp("last_round_commit", head())
+
+        # ---- GS 系列：代存档按档种选择性暂存（不再 git add -A 一把抓）----
+        # 仓库根上的新文件谁都不收（进不进仓库由用户拍板）；子目录里的新文件绿档照收；
+        # 密钥筛查只筛要入档的——留在工作区的东西进不了历史，也就不该把整档拒掉。
+        hg0 = head()
+        with open(os.path.join(S, "scratch.txt"), "w", encoding="utf-8") as f:
+            f.write("tmp\n")
+        exam("def test_gs1():\n    assert False\n")
+        pcommit("red", "存档: GS1 红考题")
+        code, d = stop_hook()
+        hg1, reason = head(), d.get("reason", "")
+        check("GS1 红档不收仓库根上的新文件：scratch.txt 留在工作区并点名，红档照落",
+              "红存档已落" in reason and "scratch.txt" in reason and "scratch.txt" not in lsfiles()
+              and hg1 != hg0 and stjson().get("red_commit_pending") is True, str(d)[:300])
+        with open(os.path.join(S, "src", "app.py"), "a", encoding="utf-8") as f:
+            f.write("y = 2\n")
+        with open(os.path.join(S, "src", "new_mod.py"), "w", encoding="utf-8") as f:
+            f.write("z = 3\n")
+        rounds_before = int(stjson().get("round_count", 0))
+        pcommit("green", "存档: GS2 绿实现")
+        code, d = stop_hook()
+        hg2, reason = head(), d.get("reason", "")
+        check("GS2 绿档收已跟踪改动 + 子目录新文件，根上的新文件仍不收",
+              "绿存档已落" in reason and hg2 != hg1 and "src/new_mod.py" in lsfiles()
+              and "scratch.txt" not in lsfiles() and "未入档" in reason and "scratch.txt" in reason
+              and int(stjson().get("round_count", 0)) == rounds_before + 1, str(d)[:300])
+        git("add", "-A", "--", "JOURNAL.md"); git("commit", "-qm", "收尾 GS2")
+        setp("last_round_commit", head())
+        hg3 = head()
+        pcommit("note", "存档: 只剩根上的新文件")
+        code, d = stop_hook()
+        reason = d.get("reason", "")
+        check("GS3 只剩根上的新文件 = 空档：拒绝，并说清是谁没入档",
+              d.get("decision") == "block" and "空档" in reason and "scratch.txt" in reason
+              and head() == hg3 and "pending_commit" not in stjson(), str(d)[:300])
+        with open(os.path.join(S, "notes.txt"), "w", encoding="utf-8") as f:
+            f.write("KEY = '" + "sk-" + "A1b2C3d4" * 3 + "'\n")   # 假密钥拼出来
+        exam("def test_gs4():\n    assert False\n")
+        pcommit("red", "存档: GS4 红考题")
+        code, d = stop_hook()
+        reason = d.get("reason", "")
+        check("GS4 密钥筛查只筛要入档的：根上像密钥的新文件不入档、不拦档，只点名",
+              "红存档已落" in reason and "notes.txt" in reason and "notes.txt" not in lsfiles()
+              and head() != hg3, str(d)[:300])
+        os.remove(os.path.join(S, "scratch.txt")); os.remove(os.path.join(S, "notes.txt"))
+        git("add", "-A"); git("commit", "-qm", "收尾 GS")
+        setp("red_commit_pending", "0"); setp("last_round_commit", head())
+
+        # ---- GH 系列：代存档不是绕过围栏的后门 ----
+        # 围栏脚本谁都不收；实现期的受保护文件：green 直接拒（判卷不能在动过手脚的考题上进行）、
+        # note 不收并点名「待撤销」、red 不受理（补考题先回 test-writing 相位，会留审计）。
+        exam("def test_gh0():\n    assert False\n")
+        pcommit("red", "存档: GH0 红考题")
+        code, d = stop_hook()
+        check("GH0 起点：test-writing 期红档照落、拿到红票",
+              "红存档已落" in d.get("reason", "") and stjson().get("red_commit_pending") is True, str(d)[:200])
+        setp("phase", "implementing")
+        hh0 = head()
+        with open(os.path.join(S, "tests", "exam_red.py"), "a", encoding="utf-8") as f:
+            f.write("# tamper\n")
+        with open(os.path.join(S, "src", "app.py"), "a", encoding="utf-8") as f:
+            f.write("w = 4\n")
+        pcommit("green", "存档: GH1 绿但考题被动过")
+        code, d = stop_hook()
+        reason = d.get("reason", "")
+        check("GH1 实现期考题有未存档改动 → 绿档拒绝（判卷不能在动过手脚的考题上进行），红票保留",
+              d.get("decision") == "block" and "受保护" in reason and "不代存" in reason
+              and head() == hh0 and "pending_commit" not in stjson()
+              and stjson().get("red_commit_pending") is True, str(d)[:300])
+        git("checkout", "--", "tests/exam_red.py")
+        pcommit("green", "存档: GH2 撤销后再绿")
+        code, d = stop_hook()
+        reason = d.get("reason", "")
+        touched = git("diff", "--name-only", "HEAD~1", "HEAD").stdout
+        check("GH2 撤销考题改动后绿档照落，考题不在这档里",
+              "绿存档已落" in reason and head() != hh0 and "src/app.py" in touched
+              and "tests/exam_red.py" not in touched, str(d)[:300])
+        hh2 = head()
+        with open(os.path.join(S, ".loopwork", "hooks", "verify.sh"), "a", encoding="utf-8") as f:
+            f.write("# tamper\n")
+        with open(os.path.join(S, "src", "app.py"), "a", encoding="utf-8") as f:
+            f.write("v = 5\n")
+        setp("red_commit_pending", "1")
+        pcommit("green", "存档: GH3 绿但判卷员被动过")
+        code, d = stop_hook()
+        reason = d.get("reason", "")
+        check("GH3 判卷员（.loopwork/hooks/）有改动 → 绿档拒绝、不落档",
+              d.get("decision") == "block" and "围栏脚本" in reason and head() == hh2, str(d)[:300])
+        git("checkout", "--", ".loopwork/hooks/verify.sh")
+        # note：受保护文件在实现期不收、回执点名「待撤销」；随后检测门照常顶回
+        setp("phase", "test-writing")
+        with open(os.path.join(S, "spec.md"), "w", encoding="utf-8") as f:
+            f.write("# spec\n")
+        git("add", "-A"); git("commit", "-qm", "GH4 起点")
+        setp("last_round_commit", head()); setp("phase", "implementing")
+        hh4 = head()
+        with open(os.path.join(S, "spec.md"), "a", encoding="utf-8") as f:
+            f.write("tampered\n")
+        with open(os.path.join(S, "JOURNAL.md"), "a", encoding="utf-8") as f:
+            f.write("- GH4 记事\n")
+        pcommit("note", "存档: GH4 记事")
+        code, d = stop_hook()
+        reason = d.get("reason", "")
+        touched = git("diff", "--name-only", "HEAD~1", "HEAD").stdout
+        check("GH4 实现期 note 不收 spec.md：记事档落了但 spec.md 留在工作区、回执点名待撤销，检测门接着顶回",
+              "记事存档已落" in reason and head() != hh4 and "JOURNAL.md" in touched
+              and "spec.md" not in touched and "待撤销" in reason and "受保护文件" in reason, str(d)[:400])
+        git("checkout", "--", "spec.md")
+        hh5 = head()
+        with open(os.path.join(S, "tests", "exam_red.py"), "a", encoding="utf-8") as f:
+            f.write("# tamper again\n")
+        pcommit("red", "存档: GH5 实现期偷改想走红档")
+        code, d = stop_hook()
+        reason = d.get("reason", "")
+        check("GH5 实现期登记红档 → 拒绝（红档只在 test-writing 相位受理）",
+              d.get("decision") == "block" and "test-writing 相位" in reason and head() == hh5
+              and "pending_commit" not in stjson(), str(d)[:300])
+        git("checkout", "--", "tests/exam_red.py")
+        git("add", "-A"); git("commit", "-qm", "收尾 GH")
+        setp("red_commit_pending", "0"); setp("last_round_commit", head()); setp("stop_blocks", "0")
+        with open(os.path.join(S, "tests", "conftest.py"), "w", encoding="utf-8") as f:
+            f.write("# infra\n")
+        code, d = stop_hook()
+        check("GH6 实现期未存档的 tests/conftest.py（白名单）不顶回", code == 0 and not d, str(d)[:200])
+        os.remove(os.path.join(S, "tests", "conftest.py"))
+        setp("phase", "test-writing")
 
         # ---- L 系列：取证账本 blocks.jsonl（拦了什么要留痕，顶回时要说出来）----
         nline = lambda p: sum(1 for _ in open(p, encoding="utf-8")) if os.path.exists(p) else 0

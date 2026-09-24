@@ -6,7 +6,7 @@
 
 ## 当前实测环境
 
-- 日期：**2026-09-10**
+- 日期：**2026-09-10**（复核：**2026-09-24** / codex-cli 0.155.0-alpha.16，见「2026-09-24 复核」一节）
 - 二进制：codex-cli **0.153.4**（`/Applications/ChatGPT.app/Contents/Resources/codex`，alpha 自动更新通道）
 - 平台：macOS（Seatbelt 沙箱）
 
@@ -37,14 +37,15 @@
                    JOURNAL/审计只增不减；自带 MAX_BLOCKS=7 刹车（实测 #8）
 代存档             同一个 Stop 钩子在沙箱外落 commit（实测 #3）：模型只登记意图
                    （progress.py commit red|green|note），钩子验过才落——
-                   密钥筛查 / red 只许考题 / green 要红票 + verify 全绿 / note 不许夹带考题
-审计               PostToolUse 全量日志 .loopwork/logs/audit.jsonl（只增不减）
-                   拦截取证 .loopwork/logs/blocks.jsonl
+                   密钥筛查 / red 只许考题 / green 要红票 + verify 全绿 / note 不许夹带考题；
+                   挑着收：红档只收 tests/ 与台账，根上其他新文件不自动入档，回执点名「未入档」
+审计               PostToolUse 全量日志 .loopwork/logs/audit.jsonl（只增不减）+ 活体心跳 hook_heartbeat.json
+                   拦截取证 blocks.jsonl / 未知工具 tools_seen.jsonl / 基建放行 allowed.jsonl / Interrupt 只记 interrupts.jsonl
 ```
 
 **升级路径**（selftest 持续探测，条件满足即可启用）：
 - 具名 Permission Profile（子路径只读）在 0.153.4 仍不可用——配置后二进制 SIGABRT（exit 134），连 `echo hi` 都跑不了。稳定版可用后，`tests/` 实现期只读可升级为 OS 级；
-- `~/.agents/skills`（新开放标准路径）本机仍不存在，安装建议继续双写两路径。
+- `~/.agents/skills`（新开放标准路径）本机 2026-09-24 仍不存在；它是可选路径，安装说明保留双写，缺它不影响 `~/.codex/skills` 生效。
 
 ## 真项目跑通记录 · 2026-09-11（不是单元测试，是拿一个空目录从头做完一轮）
 
@@ -86,12 +87,24 @@
 |---|---|---|
 | 实时拦截 | PreToolUse 钩子（`guard_edits.py` / `guard_bash.py`） | PreToolUse 钩子（`guard_pre.py`），实测同样生效 |
 | 物理边界 | 无 OS 沙箱，靠钩子覆盖面 | **多一层 Seatbelt**：工作区外、`.git` 对模型物理不可写 |
-| 存档 | 模型自己 `git commit` | **钩子代存档**：模型只登记，围栏验过才落 |
+| 存档 | 模型自己 `git commit`（含 verify-stale 闸：改完没重判不许存） | **钩子代存档**：模型只登记，围栏验过才落，且挑着收（红档只收 tests/ 与台账） |
 | 顶回刹车 | 平台 `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP`（默认 8）+ 围栏 `MAX_BLOCKS=7` | **只有**围栏 `MAX_BLOCKS=7`（平台无上限，实测 #8） |
 | 静默失效点 | 钩子未接通时 settings.json 双写兜底 | **项目未被信任时钩子层整体不加载**（实测 #7） |
 
 围栏规则本身是同一份源码：`guard_rules.py` 两版字节相同（`cmp` 可验），`progress.py` 同理。
 保护等级相当，不假装等价——差异逐条列在上表。
+
+## 2026-09-24 复核
+
+- 环境：macOS，python3 3.9.6，codex-cli 0.155.0-alpha.16；`~/.agents/skills` 本机仍不存在（可选路径）。
+- 复核过的（本机可复跑）：
+  - 机器回归 `python3 tests/test_codex_machines.py`：171/171 通过；
+  - 本轮新增覆盖：五事件接线含 Interrupt A4、Interrupt 只记录不动作 U3a–U3c、测试基建放行 X1 / X1b / X4、取证账本 blocks + tools_seen P16 / P16b、心跳 U1a / U1c / U1d / U1f、init 变动 hooks.json 时提醒重新信任 A1b / A9d、技能库 .py 全部 3.9 可编译 A2b、selftest 记指纹 A2c、建家 .gitignore 含 .loopwork/scratch/ A2d；review 收尾新增：代存档不代收受保护文件 GH0–GH6（实现期考题/围栏脚本有改动 green 拒、note 不收并点名待撤销、red 不受理）、检测门放行测试基建 B7b / B7c（与实时围栏同一把尺）、目录白名单钉死 X7 / X8（cp 到 tests/fixtures/ 目录本身仍拦）；
+  - 离线自检 `selftest.sh` 在临时项目上：10 项通过 / 1 项警告（唯一警告仍是具名 Permission Profile exit 134，与 09-10 相同）；hooks.json 指纹首跑记录、重跑判「没变」。
+- 没重测的（结论沿用 2026-09-10 实测）：
+  - 0.155 上 PreToolUse 实时拦截（自检第 [8] 项咬合联测未开 `--live`）；
+  - 真会话里的 Interrupt 事件及其 1s 默认 / 3s 上限超时；
+  - 上游 PR #47610（钩子从 `$SHELL -lc` 改为原生 spawn，预计 ≥ 0.156.1）落地后需重跑自检第 [9] 项。
 
 ---
 

@@ -33,9 +33,11 @@ NEXT_HINT = {
 }
 
 def root():
-    r = (os.environ.get("CLAUDE_PROJECT_DIR") or os.environ.get("CODEX_PROJECT_DIR")
-         or os.getcwd())
-    return r
+    """项目根：自身落点 → CLAUDE_PROJECT_DIR → 从 cwd 向上爬到 .loopwork/state.json → cwd。
+    算法住在 guard_log.find_root（两版共享）；共享库不在时退回老判法。"""
+    if guard_log is not None:
+        return guard_log.find_root(os.getcwd(), script=__file__)
+    return os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
 
 def state_path():
     return os.path.join(root(), ".loopwork", "state.json")
@@ -136,6 +138,15 @@ def card():
     hits = guard_log.count(root()) if guard_log is not None else 0
     if hits:
         lines.append(f"围栏拦截：累计 {hits} 次（明细 .loopwork/logs/blocks.jsonl）")
+    # 钩子活体：接线在盘上不等于在跑（Codex 未信任、会话根不是项目根、settings 没生效都会让围栏
+    # 静默失效）。心跳时间明显早于本次会话 = 平台没在调用围栏，先跑 selftest / 检查信任门。
+    if guard_log is not None:
+        b = guard_log.last_beat(root())
+        if b:
+            lines.append(f"上次钩子活体：{b.get('time', '?')}（{b.get('event', '?')} · {b.get('tool', '?')}）")
+        i = guard_log.last_interrupt(root())
+        if i:
+            lines.append(f"上次人为中断：{i.get('ts', '?')}")
     print("\n".join(lines))
     return 0
 

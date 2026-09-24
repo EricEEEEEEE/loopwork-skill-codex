@@ -12,10 +12,10 @@ mkdir -p "$PROJ/.loopwork/hooks" "$PROJ/.loopwork/logs" "$PROJ/tests" "$PROJ/.co
 cd "$PROJ"
 
 # 1. git（存档系统）
-if [ ! -d .git ]; then git init -q; echo "[init] git 存档系统已开启"; fi
+if [ ! -d .git ] && [ ! -f .git ]; then git init -q; echo "[init] git 存档系统已开启"; fi
 
 # 2. 机器进驻（以标准库为准，覆盖更新）
-for f in guard_rules.py guard_log.py guard_pre.py stop_hook.py audit_log.py progress.py verify.sh; do
+for f in guard_rules.py guard_log.py guard_pre.py stop_hook.py audit_log.py progress.py interrupt_log.py verify.sh selftest.sh; do
   cp -f "$SKILL_DIR/scripts/$f" ".loopwork/hooks/$f"
 done
 chmod +x .loopwork/hooks/*.sh .loopwork/hooks/*.py 2>/dev/null || true
@@ -45,6 +45,8 @@ fi
 [ -f BLOCKED.md ] || printf '# 问题本（要用户拍板的事）\n\n' > BLOCKED.md
 
 # 4. Codex 钩子接线：项目级 .codex/hooks.json（幂等合并）
+# Codex 按定义哈希逐条信任钩子：hooks.json 内容一变，之前的信任就作废、围栏静默不跑。先记指纹，变了就提醒。
+HJ_MD5_BEFORE="$(python3 -c 'import hashlib,sys; print(hashlib.md5(open(sys.argv[1],"rb").read()).hexdigest())' .codex/hooks.json 2>/dev/null || true)"
 python3 - <<'PYEOF'
 import json, os
 p = ".codex/hooks.json"
@@ -54,14 +56,29 @@ if os.path.exists(p):
         try: cfg = json.load(f)
         except Exception: cfg = {}
 hooks = cfg.setdefault("hooks", {})
+# 顶层 description 是 hooks.json 的可选元数据（官方文档：不影响哪些钩子会跑），给翻这个文件的人一句交代
+cfg.setdefault("description", "Loopwork：实时围栏 / 轮末检测门与代存档 / 审计与心跳 / 中断记录（init_project.sh 生成，幂等合并）")
 def cmd(c): return {"type": "command", "command": c}
+# 钩子命令锚定项目根：Codex 用登录 shell（$SHELL -lc）跑钩子命令，工作目录是会话当前目录
+# （可能是子目录），所以用 $(git rev-parse --show-toplevel) 现算根，不再赌「以项目根为工作目录」。
+# 本脚本已保证项目根就是 git 根（没有 .git 就 git init）；git 不在时退回 pwd（老行为）。
+ROOT_EXPR = '$(git rev-parse --show-toplevel 2>/dev/null || pwd)'
+def hook(script, args="", **extra):
+    h = cmd('python3 "' + ROOT_EXPR + '/.loopwork/hooks/' + script + '"' + args)
+    h.update(extra)
+    return h
 # PreToolUse 不写 matcher：Codex 侧 matcher 的 schema 没实测过，宁可全量收进来，
 # 由 guard_pre.py 自己按 tool_name 分派——没见过的工具放行并记账，不会误伤。
+# timeout / statusMessage 是 Codex hooks 的可选字段（官方文档，2026-09 核实；timeout 单位秒，缺省 600）：
+#   Stop 400s——它代跑 verify.sh（自身 300s 保险丝、VERIFY_TIMEOUT 330s），写成显式数字是让依据可见；
+#   PreToolUse 20s——纯函数判定，卡到 20s 一定是环境坏了，别拖住每一次工具调用；
+#   Interrupt 平台硬上限 3s、只许无输出或 JSON——interrupt_log.py 只记一行、什么都不打印。
 WANT = {
-    "PreToolUse":   [{"hooks": [cmd("python3 .loopwork/hooks/guard_pre.py")]}],
-    "SessionStart": [{"hooks": [cmd("python3 .loopwork/hooks/progress.py card")]}],
-    "Stop":         [{"hooks": [cmd("python3 .loopwork/hooks/stop_hook.py")]}],
-    "PostToolUse":  [{"hooks": [cmd("python3 .loopwork/hooks/audit_log.py")]}],
+    "PreToolUse":   [{"hooks": [hook("guard_pre.py", timeout=20, statusMessage="Loopwork 围栏检查…")]}],
+    "SessionStart": [{"hooks": [hook("progress.py", " card")]}],
+    "Stop":         [{"hooks": [hook("stop_hook.py", timeout=400, statusMessage="Loopwork 检测门 / 代存档…")]}],
+    "PostToolUse":  [{"hooks": [hook("audit_log.py")]}],
+    "Interrupt":    [{"hooks": [hook("interrupt_log.py", timeout=3)]}],
 }
 def sig(x): return json.dumps(x, sort_keys=True, ensure_ascii=False)
 for event, entries in WANT.items():
@@ -75,8 +92,12 @@ for event, entries in WANT.items():
             have.append(e)
 with open(p, "w", encoding="utf-8") as f:
     json.dump(cfg, f, ensure_ascii=False, indent=2)
-print("[init] Codex 钩子已接线 (.codex/hooks.json)")
+print("[init] Codex 钩子已接线 (.codex/hooks.json：PreToolUse / SessionStart / Stop / PostToolUse / Interrupt)")
 PYEOF
+HJ_MD5_AFTER="$(python3 -c 'import hashlib,sys; print(hashlib.md5(open(sys.argv[1],"rb").read()).hexdigest())' .codex/hooks.json 2>/dev/null || true)"
+if [ "$HJ_MD5_BEFORE" != "$HJ_MD5_AFTER" ]; then
+  echo "[init] ⚠️ .codex/hooks.json 有变动：Codex 按定义哈希信任钩子，请在 TUI 里 /hooks 重新信任（已信任过的项目也要）"
+fi
 
 # 5. 规则层：危险命令 forbidden / 敏感改写 prompt（Starlark，前缀规则）
 if [ ! -f .codex/rules/loopwork.rules ]; then
@@ -153,14 +174,26 @@ EOF
   fi
 fi
 
-# 6. 只读判卷员（原生只读子代理定义）
-if [ ! -f .codex/agents/loopwork-reviewer.toml ]; then
+# 6. 只读判卷员（原生只读子代理定义）。developer_instructions 让代理自己就知道职责与格式，
+#    不再全靠主代理记得把 reviewer.md 正文贴过来。老版只有 3 行没这个字段——文件全是 init
+#    生成的、没有用户内容，缺字段就整体重写（原地升级），有就不动。
+if [ ! -f .codex/agents/loopwork-reviewer.toml ] \
+   || ! grep -q '^developer_instructions' .codex/agents/loopwork-reviewer.toml; then
   cat > .codex/agents/loopwork-reviewer.toml <<'EOF'
 name = "loopwork-reviewer"
 description = "Loopwork 只读判卷员：两段式审查（合规+质量），只看不改"
 sandbox_mode = "read-only"
+developer_instructions = """
+你是 Loopwork 的只读判卷员（loopwork-reviewer）。只看不改：绝不修改任何文件；shell 只用于跑
+`bash .loopwork/hooks/verify.sh` 和只读 git 命令（status / diff / log / show）。沙箱是 read-only，
+但纪律不靠沙箱——发现自己想改代码，就停下来把它写进报告。
+完整任务指令是 skill 目录下的 references/reviewer.md（主代理派你时会把正文一并交给你；没交就先索要）。
+按它的四段式审：第一段 · 合规（对得上 spec？碰过红线？）→ 第二段 · 质量（🔴 / 🟡 / ⚪）
+→ 第三段 · 作弊清单（八条逐条过）→ 第四段 · 考题盲区（两问必答）。
+最后按固定格式交卷：判卷结论 / N 对 M / 考题 / 红线 / 问题 / 作弊清单 / 考题盲区 / 还漏了什么 / 给用户的一句话。
+"""
 EOF
-  echo "[init] 只读判卷员已注册 (.codex/agents/loopwork-reviewer.toml)"
+  echo "[init] 只读判卷员已注册/升级 (.codex/agents/loopwork-reviewer.toml)"
 fi
 
 # 7. 项目根 AGENTS.md 锚点（不存在才写；存在则不动用户内容）
@@ -186,7 +219,7 @@ fi
 
 # 8. .gitignore
 touch .gitignore
-for line in ".env" "*.local" ".loopwork/logs/" ".loopwork/batch.flag" "node_modules/" "__pycache__/"; do
+for line in ".env" "*.local" ".loopwork/logs/" ".loopwork/batch.flag" ".loopwork/scratch/" "node_modules/" "__pycache__/"; do
   grep -qxF "$line" .gitignore || echo "$line" >> .gitignore
 done
 
@@ -206,5 +239,5 @@ if ! git rev-parse HEAD >/dev/null 2>&1; then
   echo "[init] 首次存档完成"
 fi
 
-echo "[init] ✅ 「${NAME}」建家完成：git + 状态机 + 实时围栏(PreToolUse) + 轮末检测门/代存档 + 规则 + 判卷员 + AGENTS.md"
-echo "[init] 提醒：项目级规则/钩子需要 Codex 信任本项目后生效——首次在此项目使用 Codex 时请选择信任。"
+echo "[init] ✅ 「${NAME}」建家完成：git + 状态机 + 实时围栏(PreToolUse) + 轮末检测门/代存档 + 审计/心跳 + 中断记录 + 规则 + 判卷员 + AGENTS.md"
+echo "[init] 提醒：项目级规则/钩子需要 Codex 信任本项目后生效——首次在此项目使用 Codex 时请选择信任；钩子另按定义哈希逐条信任，hooks.json 每变一次都要回 TUI /hooks 重新审核（selftest 第 [7] 项会记指纹提醒）。"

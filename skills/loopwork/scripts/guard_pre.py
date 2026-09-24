@@ -8,7 +8,8 @@
 两者的 tool_input 都只有 command 一个键——没有 file_path，别照搬 CC 版的记忆去找。
 
 命中 → exit 2 + stderr 白话理由（0.153.4 实测拦得住：日志出现 `hook: PreToolUse Blocked`，
-考题文件原样保留）。没见过的 tool_name → 放行，但记一行 blocks.jsonl：Codex 加新工具时
+考题文件原样保留）。没见过的 tool_name → 放行，但记一行 tools_seen.jsonl（不进 blocks.jsonl：
+放行不是拦截，不该把轮末「本轮被拦 N 次」和进度卡累计数撑大）：Codex 加新工具时
 要看得见，而不是某天才发现围栏对它一直是瞎的。
 项目外 / 内部异常 → 放行（fail-open：围栏自身故障不砖会话）。
 
@@ -62,11 +63,17 @@ def patch_scan(root, tool, patch, base, phase, in_project):
     """补丁正文里的每一个落点都过一遍编辑判定，命中第一个就拦。"""
     if not in_project:
         return 0
+    infra = []
     for ap in patch_targets(patch, base):
         rel = os.path.relpath(os.path.realpath(ap), os.path.realpath(root))
         verdict = guard_rules.check_edit(rel, phase=phase, extra_protected=EXTRA_PROTECTED)
         if verdict:
             return block(root, tool, rel, phase, verdict)
+        if str(phase) == "implementing" and guard_rules.tests_infra_ok(rel):
+            infra.append(rel)
+    if guard_log is not None:
+        for rel in infra:    # 整个补丁都放行了才留痕：被拦的补丁一处都没落地
+            guard_log.allowed(root, tool=tool, target=rel, rule="tests-infra", phase=phase)
     return 0
 
 
@@ -80,8 +87,10 @@ def main():
               "请重跑 init_project.sh 补齐围栏。", file=sys.stderr)
         return 0
     try:
-        root = os.environ.get("CODEX_PROJECT_DIR") or payload.get("cwd") or os.getcwd()
-        base = payload.get("cwd") or root
+        start = payload.get("cwd") or os.getcwd()
+        root = (guard_log.find_root(start, script=__file__, env_keys=()) if guard_log is not None
+                else start)
+        base = payload.get("cwd") or root   # 补丁里的相对路径以会话 cwd 为准，不是项目根
         state_p = os.path.join(root, ".loopwork", "state.json")
         phase, in_project = "", os.path.exists(state_p)
         if in_project:
@@ -99,15 +108,19 @@ def main():
                 return block(root, tool, cmd, phase, verdict)
             # `apply_patch <<'EOF' … EOF` 也能从 shell 走：落点不在命令行上，而在 heredoc
             # 正文里——沙箱 PATH 里就装着 apply_patch 壳，这条绕道是真的，得一起扫。
-            return patch_scan(root, tool, cmd, base, phase, in_project)
+            rc = patch_scan(root, tool, cmd, base, phase, in_project)
+            if rc == 0 and guard_log is not None and guard_rules.infra_passes(
+                    cmd, phase=phase, in_project=in_project, extra_protected=EXTRA_PROTECTED):
+                guard_log.allowed(root, tool=tool, target=cmd, rule="tests-infra", phase=phase)   # 放行也留痕
+            return rc
         if low in TOOL_PATCH:
             return patch_scan(root, tool, cmd, base, phase, in_project)
 
-        # 没见过的工具：放行，但留痕。记下它带了哪些键，下次升级围栏时照着补。
+        # 没见过的工具：放行，但留痕（tools_seen.jsonl，不是 blocks.jsonl——放行不算撞墙）。
+        # 记下它带了哪些键，下次升级围栏时照着补。
         if in_project and guard_log is not None:
             keys = ",".join(sorted(str(k) for k in ti))
-            guard_log.record(root, tool=tool, target=(cmd or f"keys={keys}"),
-                             rule="unknown-tool", phase=phase)
+            guard_log.seen(root, tool=tool, target=(cmd or f"keys={keys}"), phase=phase)
         return 0
     except Exception:
         return 0  # 围栏自身故障不砖会话

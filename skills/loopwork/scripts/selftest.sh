@@ -34,9 +34,13 @@ else
   warn "$V < $MIN_VER —— 实时拦截在此版本未实测生效，降级为「OS 沙箱 + 轮末检测门」"; degrade
 fi
 
+if python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' 2>/dev/null; then ok "python3 $(python3 --version 2>&1 | cut -d' ' -f2) ≥ 3.9（机器脚本的兼容线）"
+else warn "python3 缺失或低于 3.9——机器脚本按 3.9 语法写，钩子会报错退出而不是拦截（连检测门也跑不了，只剩 OS 沙箱）"; degrade; fi
+
 say "[2] skills 扫描路径"
 [ -d "$HOME/.codex/skills" ]  && ok "~/.codex/skills 存在（旧路径，当前多数安装仍生效）" || warn "~/.codex/skills 不存在"
-[ -d "$HOME/.agents/skills" ] && ok "~/.agents/skills 存在（新开放标准路径）" || warn "~/.agents/skills 不存在（新路径未启用；建议双写安装）"
+if [ -d "$HOME/.agents/skills" ]; then ok "~/.agents/skills 存在（新开放标准路径）"
+else say "     ~/.agents/skills 不存在（可选的新标准路径；安装说明双写两路径，缺它不影响 ~/.codex/skills 生效）"; fi
 
 say "[3] 沙箱工作区边界（OS 级物理墙）"
 mkdir -p "$T/ws/src" && cd "$T/ws"
@@ -107,6 +111,15 @@ say "     验证法（30 秒）：在项目里新开一个 Codex 会话，第一
 say "     （SessionStart 钩子）——看到 = 钩子层已生效；没看到 = 先信任本项目再试。"
 say "     诊断隔离（仅排障用）：codex --dangerously-bypass-hook-trust 下钩子生效而正常启动不生效，"
 say "     即可确认是信任门问题；该旗标只许排障单次使用，不许当常态。"
+# 指纹：Codex 按定义哈希信任钩子，hooks.json 一变、之前的信任就作废——记下上次指纹，变了就点名
+HJ="$HOME_PWD/.codex/hooks.json"; FP="$HOME_PWD/.loopwork/logs/hooks.json.md5"
+if [ -f "$HJ" ]; then
+  NOW_MD5="$(python3 -c 'import hashlib,sys; print(hashlib.md5(open(sys.argv[1],"rb").read()).hexdigest())' "$HJ" 2>/dev/null)"
+  if [ ! -f "$FP" ]; then say "     首次记录 .codex/hooks.json 指纹（$NOW_MD5）；下次自检据此判断钩子定义有没有变过"
+  elif [ "$(cat "$FP")" = "$NOW_MD5" ]; then ok ".codex/hooks.json 自上次自检以来没变（上次自检后若已 /hooks 信任过，这份定义仍是被信任的那份）"
+  else warn ".codex/hooks.json 自上次自检后变过——钩子按定义哈希信任，内容一变信任就失效：去 TUI 里 /hooks 重新信任"; fi
+  mkdir -p "$(dirname "$FP")" && printf '%s\n' "$NOW_MD5" > "$FP"
+else say "     当前目录没有 .codex/hooks.json（在项目根目录跑本脚本才会记指纹）"; fi
 
 say "[8] 实时咬合联测（真的让模型去改考题，看拦不拦得住）"
 if [ "$LIVE" -ne 1 ]; then
@@ -156,6 +169,23 @@ EOF
   fi
   [ -s "$P/hooks/stop.log" ] && ok "Stop 钩子触发（检测门/代存档的载体在位）" \
                              || warn "Stop 钩子未触发——检测门与代存档不会运行"
+fi
+
+say "[9] 根解析探针（会话开在子目录时围栏还找不找得到家；离线、不花钱）"
+if [ -f "$HOME_PWD/.loopwork/hooks/guard_pre.py" ]; then
+  RMP="rm -""rf /nonexistent-loopwork-selftest"
+  SUBP="$(printf '{"tool_name":"Bash","tool_input":{"command":"%s"},"cwd":"%s"}' "$RMP" "$HOME_PWD/.loopwork")"
+  printf '%s' "$SUBP" | (cd "$HOME_PWD/.loopwork" && env -u CLAUDE_PROJECT_DIR python3 "$HOME_PWD/.loopwork/hooks/guard_pre.py") >/dev/null 2>&1
+  RC=$?
+  if [ "$RC" -eq 2 ]; then ok "从子目录喂危险命令照样被拦——机器靠自身落点找根，不赌钩子的工作目录"
+  else warn "从子目录喂危险命令没被拦（exit=${RC}）——机器脚本可能是旧版，重跑 init_project.sh 更新"; fi
+  if grep -q 'rev-parse --show-toplevel' "$HOME_PWD/.codex/hooks.json" 2>/dev/null; then
+    ok ".codex/hooks.json 的钩子命令已锚定项目根（不依赖 Codex 以项目根为工作目录）"
+  else
+    warn ".codex/hooks.json 仍是相对路径接线——会话开在子目录时钩子会静默不跑；重跑 init_project.sh 后在 TUI 里 /hooks 重新信任"
+  fi
+else
+  say "     当前目录不是 loopwork 项目（没有 .loopwork/hooks/），跳过"
 fi
 
 # 把降级结论写进项目状态：进度卡首屏会显示，用户不必记住今天自检结果
